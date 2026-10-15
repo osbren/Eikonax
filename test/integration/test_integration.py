@@ -119,8 +119,8 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
     output_partial_parameter = linalg.contract_derivative_tensors(
         output_partial_tensor, tensor_partial_parameter
     )
-    sparse_partial_solution = linalg.convert_to_scipy_sparse(output_partial_solution).todense()
-    sparse_partial_parameter = linalg.convert_to_scipy_sparse(output_partial_parameter).todense()
+    sparse_partial_solution = output_partial_solution.todense()
+    sparse_partial_parameter = output_partial_parameter.todense()
     expected_sparse_partial_solution, expected_sparse_partial_parameter = (
         expected_partial_derivatives
     )

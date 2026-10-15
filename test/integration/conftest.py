@@ -217,8 +217,6 @@ def setup_derivative_solve_checks(mesh_small):
     output_partial_parameter = linalg.contract_derivative_tensors(
         output_partial_tensor, tensor_partial_parameter
     )
-    output_partial_solution = linalg.convert_to_scipy_sparse(output_partial_solution)
-    output_partial_parameter = linalg.convert_to_scipy_sparse(output_partial_parameter)
     derivative_solver = derivator.DerivativeSolver(solution.values, output_partial_solution)
 
     return (

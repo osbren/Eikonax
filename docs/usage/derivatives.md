@@ -140,7 +140,7 @@ $\mathbf{G}_u$ and $\mathbf{G}_M$ are returned using Eikonax's custom sparse dat
 [`linalg`][eikonax.linalg] module. These structures are designed to efficiently represent the sparse 
 derivatives while maintaining JAX compatibility.
 
-$\mathbf{G}_u$ is returned as an [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] with shape 
+$\mathbf{G}_u$ is returned as a JAX BCOO sparse matrix with shape
 $N_V \times N_V$. This is a COO-style sparse matrix representation using JAX arrays that stores row 
 indices, column indices, and values separately.
 
@@ -170,7 +170,7 @@ output_partial_parameter = linalg.contract_derivative_tensors(
 )
 ```
 which efficiently contracts the two sparse tensors and returns an 
-[`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] with shape $N_V \times M$
+JAX BCOO sparse matrix with shape $N_V \times M$
 
 
 ## Derivative Solver
@@ -178,12 +178,10 @@ With the partial derivatives, we can now set up a sparse, triangular equation sy
 and subsequently the gradient $\mathbf{g}$. The rational behind this procedure is explained in more detail 
 [here][eikonax.derivator.DerivativeSolver]. 
 
-The [`DerivativeSolver`][eikonax.derivator.DerivativeSolver] requires the partial derivative 
-$\mathbf{G}_u$ in SciPy sparse format. We convert the [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] 
-using the [`convert_to_scipy_sparse`][eikonax.linalg.convert_to_scipy_sparse] utility function,
+The [`DerivativeSolver`][eikonax.derivator.DerivativeSolver] accepts the partial derivative
+$\mathbf{G}_u$ directly as a JAX BCOO sparse matrix,
 ```py
-output_partial_solution_scipy = linalg.convert_to_scipy_sparse(output_partial_solution)
-derivative_solver = derivator.DerivativeSolver(solution.values, output_partial_solution_scipy)
+derivative_solver = derivator.DerivativeSolver(solution.values, output_partial_solution)
 ```
 
 We can now evaluate the discrete adjoint from a given loss gradient $\frac{dl}{d\mathbf{u}}$,
@@ -192,13 +190,10 @@ loss_grad = np.ones(solution.values.size)
 adjoint = derivative_solver.solve(loss_grad)
 ```
 
-We then obtain the gradient by simple multiplication of the adjoint with $\mathbf{G}_m$. Since 
-$\mathbf{G}_m$ is an [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix], we convert it to 
-SciPy format for the matrix-vector multiplication,
+We then obtain the gradient by simple multiplication of the adjoint with $\mathbf{G}_m$:
 
 ```py
-output_partial_parameter_scipy = linalg.convert_to_scipy_sparse(output_partial_parameter)
-total_grad = output_partial_parameter_scipy.T @ adjoint
+total_grad = output_partial_parameter.T @ adjoint
 ```
 
 !!! tip "Reusability of the gradient copmutation"
@@ -215,7 +210,7 @@ yields a row $\mathbf{J}_i$ of the Jacobian.
 To this end, Eikonax provides the utility function [`compute_eikonax_jacobian`][eikonax.derivator.compute_eikonax_jacobian],
 ```python
 eikonax_jacobian = derivator.compute_eikonax_jacobian(
-    derivative_solver, output_partial_parameter_scipy
+    derivative_solver, output_partial_parameter
 )
 ```
 
