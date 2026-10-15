@@ -647,7 +647,8 @@ class DerivativeSolver:
         """
         num_points = solution.size
         solution = jnp.array(solution, dtype=jnp.float32)
-        self._sparse_permutation_matrix = self._assemble_permutation_matrix(solution)
+        self._permutation_indices = self._assemble_permutation_indices(solution)
+        self._inverse_permutation_indices = jnp.argsort(self._permutation_indices)
         self._sparse_system_matrix = self._assemble_system_matrix(
             sparse_partial_update_solution, num_points
         )
@@ -676,7 +677,7 @@ class DerivativeSolver:
                 optimization context.
         """
         right_hand_side = jnp.array(right_hand_side, dtype=jnp.float32)
-        permutated_right_hand_side = self._sparse_permutation_matrix @ right_hand_side
+        permutated_right_hand_side = self._permute(right_hand_side)
         operator = lx.FunctionLinearOperator(
             lambda vector: self._sparse_system_matrix @ vector,
             jax.ShapeDtypeStruct((self._sparse_system_matrix.shape[0],), jnp.float32),
@@ -689,25 +690,31 @@ class DerivativeSolver:
             throw=True,
         )
         permutated_solution = result.value
-        solution = self._sparse_permutation_matrix.T @ permutated_solution
+        solution = self._unpermute(permutated_solution)
 
         return solution
 
     # ----------------------------------------------------------------------------------------------
-    def _assemble_permutation_matrix(
-        self, solution: jtFloat[jax.Array, "num_vertices"]
-    ) -> sparse.BCOO:
-        r"""Construct permutation matrix $\mathbf{P}$ for index ordering."""
-        num_points = solution.size
-        permutation_col_inds = jnp.argsort(solution)
-        sparse_permutation_matrix = sparse.BCOO(
-            (
-                jnp.ones(num_points),
-                jnp.stack((jnp.arange(num_points), permutation_col_inds), axis=1),
-            ),
-            shape=(num_points, num_points),
-        )
-        return sparse_permutation_matrix.sum_duplicates()
+    def _permute(
+        self, vector: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtFloat[jax.Array, "num_vertices"]:
+        """Apply the causality permutation to a vector."""
+        return vector[self._permutation_indices]
+
+    # ----------------------------------------------------------------------------------------------
+    def _unpermute(
+        self, vector: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtFloat[jax.Array, "num_vertices"]:
+        """Apply the inverse causality permutation to a vector."""
+        return vector[self._inverse_permutation_indices]
+
+    # ----------------------------------------------------------------------------------------------
+    @staticmethod
+    def _assemble_permutation_indices(
+        solution: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtInt[jax.Array, "num_vertices"]:
+        r"""Construct permutation indices for causality ordering."""
+        return jnp.argsort(solution)
 
     # ----------------------------------------------------------------------------------------------
     def _assemble_system_matrix(
@@ -717,7 +724,7 @@ class DerivativeSolver:
     ) -> sparse.BCOO:
         r"""Assemble system matrix $\bar{\mathbf{A}}$ for gradient solver.
 
-        Before invoking this method, the permutation matrix $\mathbf{P}$ must be initialized.
+        Before invoking this method, the permutation indices must be initialized.
 
         Args:
             sparse_partial_update_solution (jax.experimental.sparse.BCOO): Sparse matrix
@@ -726,11 +733,13 @@ class DerivativeSolver:
                 the identity matrix and shape the final system matrix.
         """
         sparse_identity_matrix = sparse.eye(num_points, dtype=jnp.float32)
-        sparse_system_matrix = sparse_identity_matrix - sparse_partial_update_solution
         sparse_system_matrix = (
-            self._sparse_permutation_matrix
-            @ sparse_system_matrix.T
-            @ self._sparse_permutation_matrix.T
+            sparse_identity_matrix - sparse_partial_update_solution
+        ).T
+        remapped_indices = self._inverse_permutation_indices[sparse_system_matrix.indices]
+        sparse_system_matrix = sparse.BCOO(
+            (sparse_system_matrix.data, remapped_indices),
+            shape=(num_points, num_points),
         )
         return sparse_system_matrix.sum_duplicates()
 
@@ -742,9 +751,9 @@ class DerivativeSolver:
 
     # ----------------------------------------------------------------------------------------------
     @property
-    def sparse_permutation_matrix(self) -> sparse.BCOO:
-        r"""Get permutation matrix $\mathbf{P}\in\mathbb{R}^{{N_V}\times {N_V}}$."""
-        return self._sparse_permutation_matrix
+    def permutation_indices(self) -> jax.Array:
+        """Get the indices used by the causality permutation."""
+        return self._permutation_indices
 
 
 # ==================================================================================================
@@ -768,7 +777,7 @@ def compute_eikonax_jacobian(
         npt.NDArray: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
             the full dense Jacobian and is intended only for small problems.
     """
-    rhs_adjoint = np.zeros(derivative_solver.sparse_permutation_matrix.shape[0])
+    rhs_adjoint = np.zeros(derivative_solver.sparse_system_matrix.shape[0])
     jacobian = []
 
     for i, _ in enumerate(rhs_adjoint):

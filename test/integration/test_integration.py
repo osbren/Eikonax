@@ -134,11 +134,10 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
 def test_derivative_solver_constructor_viable(setup_derivative_solve_checks):
     _, solution_vector, _, _, derivative_solver, _ = setup_derivative_solve_checks
     system_matrix = derivative_solver.sparse_system_matrix.todense()
-    permutation_matrix = derivative_solver.sparse_permutation_matrix.todense()
     assert system_matrix.shape == (solution_vector.size, solution_vector.size)
-    assert permutation_matrix.shape == (solution_vector.size, solution_vector.size)
     assert np.allclose(system_matrix, np.triu(system_matrix))
-    assert np.allclose(permutation_matrix @ permutation_matrix.T, np.identity(solution_vector.size))
+    permutation_indices = np.asarray(derivative_solver.permutation_indices)
+    assert np.array_equal(np.sort(permutation_indices), np.arange(solution_vector.size))
 
 
 # --------------------------------------------------------------------------------------------------
