@@ -9,18 +9,19 @@ Classes:
 import time
 from dataclasses import dataclass
 from numbers import Real
-from typing import Annotated
+from typing import Annotated, cast
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.typing as npt
 from beartype.vale import Is, IsEqual
 from jaxtyping import Bool as jtBool
 from jaxtyping import Float as jtFloat
 from jaxtyping import Int as jtInt
 
-from . import corefunctions, logging, preprocessing, tensorfield
+from . import corefunctions, derivator, linalg, logging, preprocessing, tensorfield
 
 
 # ==================================================================================================
@@ -123,6 +124,7 @@ class Solver(eqx.Module):
     _num_vertices: int
     _num_simplices: int
     _tensor_field_object: tensorfield.TensorField
+    _partial_derivator: derivator.PartialDerivator
     _vertices: jax.Array
     _adjacency_data: jax.Array
     _loop_type: str
@@ -167,6 +169,15 @@ class Solver(eqx.Module):
                 f"but mesh has {self._num_simplices} simplices."
             )
         self._tensor_field_object = tensor_field_object
+        self._partial_derivator = derivator.PartialDerivator(
+            mesh_data,
+            derivator.PartialDerivatorData(
+                use_soft_update=solver_data.use_soft_update,
+                softminmax_order=solver_data.softminmax_order or 1,
+                softminmax_cutoff=cast(Real, solver_data.softminmax_cutoff or 1.0),
+            ),
+            initial_site_inds,
+        )
         self._vertices = jnp.array(mesh_data.vertices)
         self._adjacency_data = jnp.array(mesh_data.adjacency_data)
         self._loop_type = solver_data.loop_type
@@ -178,6 +189,8 @@ class Solver(eqx.Module):
         self._tolerance = solver_data.tolerance
         self._log_interval = solver_data.log_interval
         self._initial_site_inds = jnp.array(initial_site_inds, dtype=jnp.int32)
+        if not np.all((self._initial_site_inds >= 0) & (self._initial_site_inds < self._num_vertices)):
+            raise ValueError("Initial site indices need to be in the range [0, num_vertices-1].")
         self._logger = logger
 
     # ----------------------------------------------------------------------------------------------
@@ -211,15 +224,31 @@ class Solver(eqx.Module):
         initial_site_values = jnp.array(initial_site_values, dtype=jnp.float32)
         if initial_site_values.shape != self._initial_site_inds.shape:
             raise ValueError("Initial site values must have one value per initial site index.")
-        if (
-            not (self._initial_site_inds >= 0).all()
-            or not (self._initial_site_inds < self._num_vertices).all()
-        ):
-            raise ValueError("Initial site indices need to be in the range [0, num_vertices-1].")
+        solution_vector, num_iterations, tolerance = _run_values_custom(
+            (jnp.array(parameter_vector, dtype=jnp.float32), initial_site_values),
+            self,
+        )
+        assert solution_vector.shape[0] == self._vertices.shape[0], (
+            f"Solution vector needs to have shape {self._vertices.shape[0]}, "
+            f"but has shape {solution_vector.shape}"
+        )
+        solution = Solution(
+            values=solution_vector, num_iterations=num_iterations, tolerance=tolerance
+        )
+        return solution
 
+    # ----------------------------------------------------------------------------------------------
+    def _run_forward(
+        self,
+        parameter_vector: jtFloat[jax.Array, "num_parameters"],
+        initial_site_values: jtFloat[jax.Array, "num_initial_sites"],
+    ) -> tuple[jtFloat[jax.Array, "num_vertices"], int | jax.Array, float | jax.Array]:
+        """Run the forward solver without the public input validation."""
         tensor_field = self._tensor_field_object.assemble_field(parameter_vector)
-        initial_guess = jnp.ones(self._vertices.shape[0]) * self._max_value
-        initial_guess = initial_guess.at[self._initial_site_inds].set(initial_site_values)
+        initial_guess = jnp.ones(self._vertices.shape[0], dtype=jnp.float32) * self._max_value
+        initial_guess = jnp.asarray(initial_guess).at[self._initial_site_inds].set(
+            initial_site_values
+        )
 
         match self._loop_type:
             case "jitted_for":
@@ -231,15 +260,7 @@ class Solver(eqx.Module):
             case _:
                 raise ValueError(f"Invalid loop type: {self._loop_type}")
 
-        solution_vector, num_iterations, tolerance = run_function(initial_guess, tensor_field)
-        assert solution_vector.shape[0] == self._vertices.shape[0], (
-            f"Solution vector needs to have shape {self._vertices.shape[0]}, "
-            f"but has shape {solution_vector.shape}"
-        )
-        solution = Solution(
-            values=solution_vector, num_iterations=num_iterations, tolerance=tolerance
-        )
-        return solution
+        return run_function(initial_guess, tensor_field)
 
     # ----------------------------------------------------------------------------------------------
     @eqx.filter_jit
@@ -492,3 +513,54 @@ class Solver(eqx.Module):
             f"Vertex update has to be scalar, but has shape {vertex_update.shape}"
         )
         return vertex_update
+
+
+def _run_values(
+    vjp_args: tuple[jax.Array, jax.Array],
+    solver: Solver,
+) -> tuple[jax.Array, int | jax.Array, float | jax.Array]:
+    """Run the solver and provide an adjoint-based parameter gradient."""
+    parameter_vector, initial_site_values = vjp_args
+    return solver._run_forward(parameter_vector, initial_site_values)
+
+
+_run_values_custom = eqx.filter_custom_vjp(_run_values)
+
+
+def _run_values_fwd(
+    perturbed: tuple[bool, bool],
+    vjp_args: tuple[jax.Array, jax.Array],
+    solver: Solver,
+):
+    del perturbed
+    parameter_vector, initial_site_values = vjp_args
+    output = solver._run_forward(parameter_vector, initial_site_values)
+    solution, _, _ = output
+    tensor_field = solver._tensor_field_object.assemble_field(parameter_vector)
+    partial_solution, partial_tensor = solver._partial_derivator.compute_partial_derivatives(
+        solution, tensor_field
+    )
+    partial_parameter = linalg.contract_derivative_tensors(
+        partial_tensor, solver._tensor_field_object, parameter_vector
+    )
+    return output, (solution, partial_solution, partial_parameter)
+
+
+def _run_values_bwd(
+    residuals,
+    grad_obj,
+    perturbed,
+    vjp_args,
+    solver,
+):
+    del perturbed
+    solution, partial_solution, partial_parameter = residuals
+    grad_solution = grad_obj[0]
+    derivative_solver = derivator.DerivativeSolver(solution, partial_solution)
+    adjoint = derivative_solver.solve(grad_solution)
+    parameter_gradient = partial_parameter.T @ adjoint
+    return (parameter_gradient, jnp.zeros_like(vjp_args[1]))
+
+
+_run_values_custom.def_fwd(_run_values_fwd)
+_run_values_custom.def_bwd(_run_values_bwd)

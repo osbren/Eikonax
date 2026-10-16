@@ -101,9 +101,33 @@ eikonax_solver = solver.Solver(
 solution = eikonax_solver.run(parameter_vector, initial_site_values=jnp.array([0.0]))
 ```
 
-## Partial Derivatives
+## Automatic Gradients
 
-Evaluating the gradient $g(\mathbf{m})$ is a two-step procedure in Eikonax. Firstly, we evaluate, for a
+The solver integrates the derivative machinery into its parameter path. Users can therefore apply
+`jax.grad` to any scalar objective built from `Solver.run` without constructing a
+`PartialDerivator` or `DerivativeSolver` explicitly:
+
+```py
+import jax
+
+def objective(parameter_vector):
+    solution = eikonax_solver.run(
+        parameter_vector,
+        initial_site_values=jnp.array([0.0]),
+    )
+    return solution.values.sum()
+
+gradient = jax.grad(objective)(parameter_vector)
+```
+
+The custom backward pass computes the local update derivatives, contracts them with the
+TensorField's local VJPs, and solves the discrete adjoint system internally. The forward result
+remains a [`Solution`][eikonax.solver.Solution] object.
+
+## Low-Level Derivatives
+
+For advanced use cases, the individual derivative components remain available. Evaluating the
+gradient $g(\mathbf{m})$ manually is a two-step procedure in Eikonax. Firstly, we evaluate, for a
 given parameter vector $\mathbf{m}$ and associated solution $\mathbf{u}$, the
 partial derivatives $\mathbf{G}_u$ and $\mathbf{G}_M$ of the global update operator in the
 [iterative solver][eikonax.solver.Solver]. This can be done with the

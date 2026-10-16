@@ -198,7 +198,6 @@ class PartialDerivator(eqx.Module):
             (values, jnp.stack((row_inds, col_inds), axis=1)),
             shape=(self._num_vertices, self._num_vertices),
         )
-        eikonax_sparse_matrix = eikonax_sparse_matrix.sum_duplicates()
         return eikonax_sparse_matrix
 
     # ----------------------------------------------------------------------------------------------
@@ -741,7 +740,7 @@ class DerivativeSolver:
             (sparse_system_matrix.data, remapped_indices),
             shape=(num_points, num_points),
         )
-        return sparse_system_matrix.sum_duplicates()
+        return sparse_system_matrix
 
     # ----------------------------------------------------------------------------------------------
     @property
