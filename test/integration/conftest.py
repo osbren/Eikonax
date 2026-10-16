@@ -72,10 +72,24 @@ def meshes_for_2d_forward_evaluation(request):
 @pytest.fixture(scope="module")
 def configurations_for_2d_forward_evaluation(meshes_for_2d_forward_evaluation, eikonax_solver_data):
     vertices, simplices = meshes_for_2d_forward_evaluation
-    initial_sites = preprocessing.InitialSites(inds=(0,), values=(0,))
+    initial_site_inds = jnp.array((0,), dtype=jnp.int32)
+    initial_site_values = jnp.array((0.0,), dtype=jnp.float32)
     mesh_data = preprocessing.MeshData(vertices=vertices, simplices=simplices)
     solver_data = solver.SolverData(**eikonax_solver_data)
-    return simplices, vertices, mesh_data, solver_data, initial_sites
+    tensor_field_object = tensorfield.TensorField(
+        simplices.shape[0],
+        tensorfield.LinearScalarMap(),
+        tensorfield.InvLinearScalarSimplexTensor(2),
+    )
+    return (
+        simplices,
+        vertices,
+        mesh_data,
+        solver_data,
+        initial_site_inds,
+        initial_site_values,
+        tensor_field_object,
+    )
 
 
 # --------------------------------------------------------------------------------------------------
@@ -83,7 +97,8 @@ def configurations_for_2d_forward_evaluation(meshes_for_2d_forward_evaluation, e
 def configurations_and_tensorfields_2d_uniform(configurations_for_2d_forward_evaluation):
     simplices, *_ = configurations_for_2d_forward_evaluation
     tensor_field = np.repeat(np.identity(2)[np.newaxis, :, :], simplices.shape[0], axis=0)
-    return configurations_for_2d_forward_evaluation, tensor_field
+    parameter_vector = jnp.array(tensor_field[:, 0, 0])
+    return configurations_for_2d_forward_evaluation, tensor_field, parameter_vector
 
 
 # --------------------------------------------------------------------------------------------------
@@ -95,7 +110,8 @@ def configurations_and_tensorfields_2d_random(configurations_for_2d_forward_eval
     inv_speed_values = rng.uniform(0.5, 1.5, num_simplices)
     tensor_field = np.repeat(np.identity(2)[np.newaxis, :, :], simplices.shape[0], axis=0)
     tensor_field = np.einsum("i,ijk->ijk", inv_speed_values, tensor_field)
-    return configurations_for_2d_forward_evaluation, tensor_field
+    parameter_vector = jnp.array(tensor_field[:, 0, 0])
+    return configurations_for_2d_forward_evaluation, tensor_field, parameter_vector
 
 
 # --------------------------------------------------------------------------------------------------
@@ -110,7 +126,8 @@ def configurations_and_tensorfields_2d_function(configurations_for_2d_forward_ev
     )
     tensor_field = np.repeat(np.identity(2)[np.newaxis, :, :], simplices.shape[0], axis=0)
     tensor_field = np.einsum("i,ijk->ijk", inv_speed_values, tensor_field)
-    return configurations_for_2d_forward_evaluation, tensor_field
+    parameter_vector = jnp.array(tensor_field[:, 0, 0])
+    return configurations_for_2d_forward_evaluation, tensor_field, parameter_vector
 
 
 # ============================== Setup for Parametric Derivatives ==================================
@@ -127,13 +144,19 @@ def setup_analytical_partial_derivative_tests(
         "softminmax_order": 20,
         "softminmax_cutoff": 1,
     }
-    initial_sites = {"inds": (0,), "values": (0,)}
+    initial_site_inds = jnp.array((0,), dtype=jnp.int32)
+    tensor_field_object = tensorfield.TensorField(
+        simplices.shape[0],
+        tensorfield.LinearScalarMap(),
+        tensorfield.InvLinearScalarSimplexTensor(tensor_dim),
+    )
     input_data = (
         vertices,
         simplices,
         parameter_vector,
         tensor_field,
-        initial_sites,
+        initial_site_inds,
+        tensor_field_object,
         derivator_data,
     )
 
@@ -197,7 +220,7 @@ def setup_derivative_solve_checks(mesh_small):
     )
     vertices, simplices, _ = mesh_small
     mesh_data = preprocessing.MeshData(vertices=vertices, simplices=simplices)
-    initial_sites = preprocessing.InitialSites(inds=(0,), values=(0,))
+    initial_site_inds = jnp.array((0,), dtype=jnp.int32)
     rng = np.random.default_rng(seed=0)
     parameter_vector = rng.uniform(0.5, 1.5, simplices.shape[0])
     parameter_vector = jnp.array(parameter_vector)
@@ -206,10 +229,14 @@ def setup_derivative_solve_checks(mesh_small):
     tensor_field = tensorfield.TensorField(
         simplices.shape[0], tensor_field_mapping, tensor_on_simplex
     )
+    eikonal_solver = solver.Solver(
+        mesh_data, solver_data, tensor_field, initial_site_inds
+    )
+    solution = eikonal_solver.run(parameter_vector, np.array([0.0]))
     parameter_field = tensor_field.assemble_field(parameter_vector)
-    eikonal_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-    solution = eikonal_solver.run(parameter_field)
-    eikonax_derivator = derivator.PartialDerivator(mesh_data, derivator_data, initial_sites)
+    eikonax_derivator = derivator.PartialDerivator(
+        mesh_data, derivator_data, initial_site_inds
+    )
     output_partial_solution, output_partial_tensor = eikonax_derivator.compute_partial_derivatives(
         solution.values, parameter_field
     )

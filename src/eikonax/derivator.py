@@ -88,7 +88,7 @@ class PartialDerivator(eqx.Module):
         self,
         mesh_data: preprocessing.MeshData,
         derivator_data: PartialDerivatorData,
-        initial_sites: preprocessing.InitialSites,
+        initial_site_inds: jtInt[jax.Array | npt.NDArray, "num_initial_sites"],
     ) -> None:
         """Constructor for the partial derivator object.
 
@@ -96,13 +96,13 @@ class PartialDerivator(eqx.Module):
             mesh_data (preprocessing.MeshData): Mesh data object also utilized for the Eikonax
                 solver, contains adjacency data for every vertex.
             derivator_data (PartialDerivatorData): Settings for initialization of the derivator.
-            initial_sites (preprocessing.InitialSites): Locations and values at source points
+            initial_site_inds (jax.Array | npt.NDArray): Vertex indices of the source points
         """
         self._num_vertices = mesh_data.num_vertices
         self._num_simplices = mesh_data.num_simplices
         self._vertices = mesh_data.vertices
         self._adjacency_data = mesh_data.adjacency_data
-        self._initial_site_inds = initial_sites.inds
+        self._initial_site_inds = jnp.array(initial_site_inds, dtype=jnp.int32)
         self._use_soft_update = derivator_data.use_soft_update
         self._softminmax_order = derivator_data.softminmax_order
         self._softminmax_cutoff = derivator_data.softminmax_cutoff
