@@ -53,7 +53,7 @@ The resulting field has a circular region of slow conductivity around the center
 With the mesh and tensor field, we can now set up the Eikonax solver. This requires the [`preprocessing`][eikonax.preprocessing] and [`solver`][eikonax.solver] modules.
 
 ```py
-from eikonax import preprocessing, solver
+from eikonax import preprocessing, solver, tensorfield
 ```
 
 
@@ -64,9 +64,9 @@ The preprocessing is performed automatically during the initialization of the  [
 mesh_data = preprocessing.MeshData(vertices, simplices)
 ```
 
-For a well-defined solution of the eikonal equation, we further require a set of initial sites $\Gamma\subset\Omega$, for which the solution values are known. In Eikonax, an initial site has to be set in the [`InitialSites`][eikonax.preprocessing.InitialSites] object through the index of the respective mesh vertex. Here, we choose $i = 0$ and $u_0 = 0$,
+For a well-defined solution of the eikonal equation, we further require a set of initial sites $\Gamma\subset\Omega$. In Eikonax, the integer JAX vector `initial_site_inds` stores the indices of the respective mesh vertices. Here, we choose $i = 0$,
 ```py
-initial_sites = preprocessing.InitialSites(inds=(0,), values=(0,))
+initial_site_inds = jnp.array((0,), dtype=jnp.int32)
 ```
 
 Lastly, we set up the configuration for the Eikonax solver via the [`SolverData`][eikonax.solver.SolverData] object:
@@ -104,11 +104,26 @@ The above data class requires some further elaboration, which we give in the fol
 - **`softminmax_cutoff`** is the offset after which the differentiable transformation for $\lambda$ is truncated, see [`compute_softminmax`][eikonax.corefunctions.compute_softminmax], only applies if `use_soft_update` is `True`.
 
 ## Initialization and Run
-We can now initialize the Eikonax [`Solver`][eikonax.solver.Solver] object and invoke its [`run`][eikonax.solver.Solver.run] method,
+The tensor-field mapping is owned by the solver. For the scalar field above, use one parameter per
+simplex and provide the inverse-speed values as the parameter vector:
 ```py
-eikonax_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-solution = eikonax_solver.run(tensor_field)
+tensor_field_object = tensorfield.TensorField(
+    num_simplices=simplices.shape[0],
+    vector_to_simplices_map=tensorfield.LinearScalarMap(),
+    simplex_tensor=tensorfield.LinearScalarSimplexTensor(dimension=2),
+)
+eikonax_solver = solver.Solver(
+    mesh_data,
+    solver_data,
+    tensor_field_object,
+    initial_site_inds=initial_site_inds,
+)
+solution = eikonax_solver.run(inv_speed_values, initial_site_values=jnp.array([0.0]))
 ```
+
+The initial-site vertices are fixed when the solver is constructed, while their values are supplied
+to each `run` call. This permits repeated solves with different source values without rebuilding the
+solver.
 
 A successful solver run returns a [`Solution`][eikonax.solver.Solution] data class, which contains the actual solution array, the number of performed iterations, and the reached tolerance. In our example, the solution of the eikonal equation looks like this:
 
