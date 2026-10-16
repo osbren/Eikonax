@@ -41,30 +41,24 @@ mesh_data = preprocessing.MeshData(vertices, simplices)
 In the [Forward Solver](./solve.md) tutorial, we have constructed a specific tensor field instance as a simple
 `numpy` array. To evaluate derivatives, however, we need to properly define a mapping $\mathbf{M}(\mathbf{m})$,
 and its derivative. Such a mapping is provided by the [tensorfield][eikonax.tensorfield] module.
-The tensor field module comprises interfaces and basic implementations for two separate components.
-The [`SimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor] describes how, for a given simplex index
-$s$ and local parameter vector $\mathbf{m}_s$, the tensor $M_s$ for that simplex is constructed.
-The [`VectorToSimplicesMap`][eikonax.tensorfield.AbstractVectorToSimplicesMap], in turn, defines the
-comtributions to $\mathbf{m}_s$ from the global parameter vector $\mathbf{m}$ for a given simplex s.
-The actual [`TensorField`][eikonax.tensorfield.TensorField] object is created from these two components.
+The [`SimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor] describes how a local parameter
+vector $\mathbf{m}_s$ is mapped to the tensor $M_s$ for a simplex. The
+[`TensorField`][eikonax.tensorfield.TensorField] gathers each simplex's local parameters using its
+fixed-width `parameter_inds` array and applies the local tensor callable.
 
 !!! info
-    The above procedure is quite low-level and requires some effort from the user side. On the other
-    hand, it guarantees flexibility with respect to the employed type of tensor field. Through strict
-    application of the composition-over-inheritance principle, we can mix different global-to-local
-    mappings and tensor assemblies, which are swiftly vectorized and differentiated by JAX.
+    This structure keeps parameter connectivity explicit while allowing arbitrary differentiable
+    local tensor callables, which are vectorized and differentiated by JAX.
 
 In our example, we define local tensors with the built-in [InvLinearScalarSimplexTensor][eikonax.tensorfield.InvLinearScalarSimplexTensor]. This assembles the local tensor from a scalar $m_s > 0$
-simply as $\mathbf{M}_s = \frac{1}{m_s}\mathbf{I}$. We further employ the [LinearScalarMap][eikonax.tensorfield.LinearScalarMap],
-which is basically the map $m_s = \mathbf{m}[s]$. In total, we create our tensor field like this:
+simply as $\mathbf{M}_s = \frac{1}{m_s}\mathbf{I}$. The fixed parameter-index array selects
+$m_s = \mathbf{m}[s]$. In total, we create our tensor field like this:
 ```py
 from eikonax import tensorfield
 
 tensor_on_simplex = tensorfield.InvLinearScalarSimplexTensor(dimension=vertices.shape[1])
-tensor_field_mapping = tensorfield.LinearScalarMap()
 tensor_field_object = tensorfield.TensorField(
-    num_simplices=simplices.shape[0],
-    vector_to_simplices_map=tensor_field_mapping,
+    parameter_inds=jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
     simplex_tensor=tensor_on_simplex,
 )
 ```
@@ -155,26 +149,20 @@ derivative contributions from adjacent simplices in a dense local format (shape
 $N_V \times \text{max\_neighbors} \times d \times d$) along with adjacency data mapping to global 
 simplex indices.
 
-To compute the total derivative $\mathbf{G}_m$ according to the chain rule, we require the tensor field 
-Jacobian $\frac{d\mathbf{M}}{d\mathbf{m}}$. This is provided by the tensor field component through the
-[`assemble_jacobian`][eikonax.tensorfield.TensorField.assemble_jacobian] method,
-```py
-tensor_partial_parameter = tensor_field_object.assemble_jacobian(parameter_vector)
-```
-The Jacobian $\frac{d\mathbf{M}}{d\mathbf{m}}$ is returned as a 
-[`TensorfieldSparseTensor`][eikonax.linalg.TensorfieldSparseTensor], which stores derivative values 
-of shape $N_S \times d \times d \times \texttt{num_params_mapped}$ together with parameter indices 
-indicating which global parameters each simplex depends on.
-
-We can now obtain $\mathbf{G}_m$ via the tensor contraction function provided by Eikonax,
+The total derivative $\mathbf{G}_m$ is computed with local vector-Jacobian products. The tensor
+field uses its fixed-width `parameter_inds` array to select the parameters for each simplex, and
+JAX differentiates the local metric callable directly. No dense TensorField Jacobian is formed.
+We can obtain $\mathbf{G}_m$ via the tensor contraction function provided by Eikonax,
 ```py
 from eikonax import linalg
 
 output_partial_parameter = linalg.contract_derivative_tensors(
-    output_partial_tensor, tensor_partial_parameter
+    output_partial_tensor,
+    tensor_field_object,
+    parameter_vector,
 )
 ```
-which efficiently contracts the two sparse tensors and returns an 
+which efficiently applies the local VJPs and returns an
 JAX BCOO sparse matrix with shape $N_V \times M$
 
 

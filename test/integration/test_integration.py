@@ -22,13 +22,15 @@ pytestmark = pytest.mark.integration
 def test_tensor_field_assemble(
     small_tensorfield_setup_linear_scalar_map_linear_scalar_simplex_tensor,
 ):
-    data, MapObject, SimplexObject = (  # noqa: N806
+    data, SimplexObject = (  # noqa: N806
         small_tensorfield_setup_linear_scalar_map_linear_scalar_simplex_tensor
     )
     dimension, num_simplices, parameter_vector, expected_tensor_field, _ = data
-    map_object = MapObject()
     simplex_object = SimplexObject(dimension)
-    tensorfield_object = tensorfield.TensorField(num_simplices, map_object, simplex_object)
+    tensorfield_object = tensorfield.TensorField(
+        jnp.arange(num_simplices, dtype=jnp.int32)[:, None],
+        simplex_object,
+    )
     field = tensorfield_object.assemble_field(parameter_vector)
     assert jnp.allclose(field, expected_tensor_field)
 
@@ -126,12 +128,11 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
     eikonax_derivator = derivator.PartialDerivator(
         mesh_data, derivator_data, initial_site_inds
     )
-    tensor_partial_parameter = tensor_field_object.assemble_jacobian(parameter_vector)
     output_partial_solution, output_partial_tensor = eikonax_derivator.compute_partial_derivatives(
         fwd_solution, tensor_field
     )
     output_partial_parameter = linalg.contract_derivative_tensors(
-        output_partial_tensor, tensor_partial_parameter
+        output_partial_tensor, tensor_field_object, jnp.array(parameter_vector)
     )
     sparse_partial_solution = output_partial_solution.todense()
     sparse_partial_parameter = output_partial_parameter.todense()
