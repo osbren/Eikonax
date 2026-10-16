@@ -29,7 +29,7 @@ def small_tensorfield_setup_linear_scalar_map_linear_scalar_simplex_tensor():
         expected_field_derivative,
     )
 
-    return data, tensorfield.LinearScalarMap, tensorfield.InvLinearScalarSimplexTensor
+    return data, tensorfield.InvLinearScalarSimplexTensor
 
 
 # ================================ Setup for Forward Solver Runs ===================================
@@ -77,8 +77,7 @@ def configurations_for_2d_forward_evaluation(meshes_for_2d_forward_evaluation, e
     mesh_data = preprocessing.MeshData(vertices=vertices, simplices=simplices)
     solver_data = solver.SolverData(**eikonax_solver_data)
     tensor_field_object = tensorfield.TensorField(
-        simplices.shape[0],
-        tensorfield.LinearScalarMap(),
+        jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
         tensorfield.InvLinearScalarSimplexTensor(2),
     )
     return (
@@ -146,8 +145,7 @@ def setup_analytical_partial_derivative_tests(
     }
     initial_site_inds = jnp.array((0,), dtype=jnp.int32)
     tensor_field_object = tensorfield.TensorField(
-        simplices.shape[0],
-        tensorfield.LinearScalarMap(),
+        jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
         tensorfield.InvLinearScalarSimplexTensor(tensor_dim),
     )
     input_data = (
@@ -224,10 +222,9 @@ def setup_derivative_solve_checks(mesh_small):
     rng = np.random.default_rng(seed=0)
     parameter_vector = rng.uniform(0.5, 1.5, simplices.shape[0])
     parameter_vector = jnp.array(parameter_vector)
-    tensor_on_simplex = tensorfield.InvLinearScalarSimplexTensor(vertices.shape[1])
-    tensor_field_mapping = tensorfield.LinearScalarMap()
     tensor_field = tensorfield.TensorField(
-        simplices.shape[0], tensor_field_mapping, tensor_on_simplex
+        jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
+        tensorfield.InvLinearScalarSimplexTensor(vertices.shape[1]),
     )
     eikonal_solver = solver.Solver(
         mesh_data, solver_data, tensor_field, initial_site_inds
@@ -240,9 +237,8 @@ def setup_derivative_solve_checks(mesh_small):
     output_partial_solution, output_partial_tensor = eikonax_derivator.compute_partial_derivatives(
         solution.values, parameter_field
     )
-    tensor_partial_parameter = tensor_field.assemble_jacobian(parameter_vector)
     output_partial_parameter = linalg.contract_derivative_tensors(
-        output_partial_tensor, tensor_partial_parameter
+        output_partial_tensor, tensor_field, parameter_vector
     )
     derivative_solver = derivator.DerivativeSolver(solution.values, output_partial_solution)
 
