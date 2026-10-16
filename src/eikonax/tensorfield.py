@@ -1,29 +1,17 @@
 r"""Composable and differentiable parameter tensor fields.
 
-This module provides ABCs and implementations for the creation of differentiable parameter fields
-used in Eikonax. Recall that for the Eikonax solver, and particularly parametric derivatives, we
-require an input tensor field
+This module provides callable local metric modules for differentiable parameter fields. Recall that
+for the Eikonax solver, and particularly parametric derivatives, we require an input tensor field
 $\mathbf{M}: \mathbb{R}^M \times \mathbb{N}_0 \to \mathbb{S}_+^{d\times d}$. This means that the
 tensor field is a mapping $\mathbf{M}(\mathbf{m},s)$ that assigns, given a global parameter vector
 $\mathbf{m}$, an s.p.d tensor to every simplex $s$ in the mesh. To allow for sufficient flexibility
-in the choice of tensor field, we implement it as a composition of two main components.
-
-1. [`AbstractVectorToSimplicesMap`][eikonax.tensorfield.AbstractVectorToSimplicesMap] provides the
-    interface for a mapping from the global parameter vector $\mathbf{m}$ to the local parameter
-    values $\mathbf{m}_s$ required to assemble the tensor $\mathbf{M}_s$ for simplex $s$.
-2. [`AbstractSimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor] provides the interface for
-    the assembly of the local tensor $\mathbf{M}_s$, given the local contributions $\mathbf{m}_s$
-    and a simplex s.
-
-Concrete implementations of both components are used to initialize the
-[`TensorField`][eikonax.tensorfield.TensorField] object, which vectorizes and differentiates them
-using JAX, to provide the mapping $\mathbf{M}(\mathbf{m})$ and its Jacobian tensor
-$\frac{d \mathbf{M}}{d \mathbf{m}}$.
+in the choice of tensor field, each simplex uses a fixed-width row of `parameter_inds` to gather
+its local parameters. An [`AbstractSimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor]
+callable maps those local parameters to the simplex metric. [`TensorField`][eikonax.tensorfield.TensorField]
+vectorizes the callable and uses local JAX VJPs for derivative contractions.
 
 Classes:
-    AbstractVectorToSimplicesMap: ABC interface contract for vector-to-simplices maps
-    LinearScalarMap: Simple one-to-one map from global to simplex parameters
-    AbstractSimplexTensor: ABC interface contract for assembly of the tensor field
+    AbstractSimplexTensor: ABC interface contract for local simplex metrics
     LinearScalarSimplexTensor: SimplexTensor implementation relying on one parameter per simplex
     InvLinearScalarSimplexTensor: SimplexTensor implementation relying on one parameter per simplex
     TensorField: Tensor field component
@@ -40,136 +28,13 @@ from jaxtyping import Float as jtFloat
 from jaxtyping import Int as jtInt
 from jaxtyping import Real as jtReal
 
-from . import linalg
-
-
-# ==================================================================================================
-class AbstractVectorToSimplicesMap(eqx.Module):
-    """ABC interface contract for vector-to-simplices maps.
-
-    Every component derived from this class needs to implement the `map`  and `derivative`  methods.
-    The `map` method is responsible for returning the relevant parameters for a given simplex from
-    the global parameter vector. The `derivative` method computes the derivative of the mapping with
-    respect to the global parameters.
-
-    Methods:
-        map: Interface for vector-to-simplex mapping
-        derivative: Interface for vector-to-simplex mapping derivative
-    """
-
-    # ----------------------------------------------------------------------------------------------
-    @abstractmethod
-    def map(
-        self, simplex_ind: jtInt[jax.Array, ""], parameters: jtReal[jax.Array, "num_parameters"]
-    ) -> jtReal[jax.Array, "num_parameters_local"]:
-        """Interface for vector-to-simplex mapping.
-
-        For the given `simplex_ind`, return those parameters from the global parameter vector that
-        are relevant for the simplex. This method needs to be broadcastable over `simplex_ind` by
-        JAX (with `vmap`).
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            parameters (jax.Array): Global parameter vector.
-
-        Raises:
-            NotImplementedError: ABC error indicating that the method needs to be implemented
-                in subclasses.
-
-        Returns:
-            jax.Array: Relevant parameters for the simplex.
-        """
-        raise NotImplementedError
-
-    # ----------------------------------------------------------------------------------------------
-    @abstractmethod
-    def derivative(
-        self, simplex_ind: jtInt[jax.Array, ""], parameters: jtReal[jax.Array, "num_parameters"]
-    ) -> tuple[
-        jtReal[jax.Array, "num_parameters_local num_parameters_mapped"],
-        jtInt[jax.Array, "num_parameters_mapped"],
-    ]:
-        r"""Interface for vector-to-simplex mapping derivative.
-
-        The derivative of the simplex mapping for a given `simplex_ind` is a `num_local_parameters`
-        $\times$ `num_parameters` Jacobian matrix, where the only non-zero entries are in the
-        columns corresponding to the values in the global parameter that are used for the current
-        simplex. The corresponding entries are typically identical to one. This method returns
-        the Jacobian matrix in a sparse representation: one array with matrix values and one
-        array with the corresponding column indices.
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            parameters (jax.Array): Global parameter vector.
-
-        Raises:
-            NotImplementedError: ABC error indicating that the method needs to be implemented
-                in subclasses.
-
-        Returns:
-            tuple[jax.Array, jax.Array]: Jacobian matrix values and corresponding global parameter
-                indices. First array has shape (num_parameters_local, num_parameters_mapped),
-                second array has shape (num_parameters_mapped,).
-        """
-        raise NotImplementedError
-
-
-# --------------------------------------------------------------------------------------------------
-@final
-class LinearScalarMap(AbstractVectorToSimplicesMap):
-    r"""Simple one-to-one map from global to simplex parameters.
-
-    Every simplex takes exactly one parameter $m_s$, which is sorted in the global parameter
-    in the same order as the simplices, meaning that $m_s = \mathbf{m}[s]$.
-    """
-
-    # ----------------------------------------------------------------------------------------------
-    def map(
-        self,
-        simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtReal[jax.Array, "num_parameters"],
-    ) -> jtReal[jax.Array, "num_parameters_local"]:
-        """Return relevant parameters for a given simplex.
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            parameters (jax.Array): Global parameter vector.
-
-        Returns:
-            jax.Array: Relevant parameter (only one) with shape (1,).
-        """
-        parameter = jnp.expand_dims(parameters[simplex_ind], axis=-1)
-        return parameter
-
-    # ----------------------------------------------------------------------------------------------
-    def derivative(
-        self, simplex_ind: jtInt[jax.Array, ""], _parameters: jtReal[jax.Array, "num_parameters"]
-    ) -> tuple[
-        jtReal[jax.Array, "num_parameters_local num_parameters_mapped"],
-        jtInt[jax.Array, "num_parameters_mapped"],
-    ]:
-        """Return sparse representation of Jacobi matrix, in this case two arrays of size one.
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            _parameters (jax.Array): Global parameter vector (not used).
-
-        Returns:
-            tuple[jax.Array, jax.Array]: Jacobian matrix values and corresponding global parameter
-                indices. Both arrays have shape (1, 1) and (1,) respectively.
-        """
-        derivative_vals = jnp.identity(1, dtype=jnp.float32)
-        global_parameter_inds = jnp.array((simplex_ind,), dtype=jnp.int32)
-        return derivative_vals, global_parameter_inds
-
-
 # ==================================================================================================
 class AbstractSimplexTensor(eqx.Module):
-    """ABC interface contract for assembly of the tensor field.
+    """ABC interface contract for local simplex metrics.
 
-    `SimplexTensor` components assemble the tensor field for a given simplex and a set of parameters
-    for that simplex. The relevant parameters are provided by the `VectorToSimplicesMap` component
-    from the global parameter vector.
+    `SimplexTensor` components map local parameters to a metric tensor. The relevant parameters are
+    gathered from the global parameter vector using the TensorField's fixed-width
+    ``parameter_inds`` array.
 
     !!! note
         This class provides the metric tensor as used in the inner product for the update stencil of
@@ -177,222 +42,101 @@ class AbstractSimplexTensor(eqx.Module):
         actual tensor field in the eikonal equation.
 
     Methods:
-        assemble: Assemble the tensor field for a given simplex and parameters
-        derivative: Parametric derivative of the `assemble` method
+        __call__: Map local parameters to one simplex metric
     """
+
+    @abstractmethod
+    def __call__(
+        self, parameters: jtFloat[jax.Array, "num_parameters_local"]
+    ) -> jtFloat[jax.Array, "dim dim"]:
+        """Map local parameters to one simplex metric."""
+        raise NotImplementedError
 
     # Equinox modules are data classes, so we have to define attributes at the class level
     dimension: int
-
-    # ----------------------------------------------------------------------------------------------
-    @abstractmethod
-    def assemble(
-        self,
-        simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtFloat[jax.Array, "num_parameters_local"],
-    ) -> jtFloat[jax.Array, "dim dim"]:
-        r"""Assemble the tensor field for given simplex and parameters.
-
-        Given a parameter array of size $m_s$, the method returns a tensor of size $d\times d$.
-        The method needs to be broadcastable over `simplex_ind` by JAX (with `vmap`).
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            parameters (jax.Array): Parameters for the simplex.
-
-        Raises:
-            NotImplementedError: ABC error indicating that the method needs to be implemented
-                in subclasses.
-
-        Returns:
-            jax.Array: Tensor field for the simplex under consideration with shape (dim, dim).
-        """
-        raise NotImplementedError
-
-    # ----------------------------------------------------------------------------------------------
-    @abstractmethod
-    def derivative(
-        self,
-        simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtFloat[jax.Array, "num_parameters_local"],
-    ) -> jtFloat[jax.Array, "dim dim num_local_parameters"]:
-        r"""Parametric derivative of the `assemble` method.
-
-        Given a parameter array of size $m_s$, the method returns a Jacobian tensor of size
-        $d\times d\times m_s$. The method needs to be broadcastable over `simplex_ind` by JAX
-        (with `vmap`).
-
-        Args:
-            simplex_ind (int): Index of the simplex under consideration.
-            parameters (jax.Array): Parameters for the simplex.
-
-        Raises:
-            NotImplementedError: ABC error indicating that the method needs to be implemented
-                in subclasses.
-
-        Returns:
-            jax.Array: Jacobian tensor for the simplex under consideration with shape
-                (dim, dim, num_local_parameters).
-        """
-        raise NotImplementedError
-
 
 # ==================================================================================================
 @final
 class LinearScalarSimplexTensor(AbstractSimplexTensor):
     r"""SimplexTensor implementation relying on one parameter per simplex.
 
-    Given a scalar parameter $m_s$, the tensor field is assembled as $m_s \cdot \mathbf{I}$, where
+    Given a scalar parameter $m_s$, the metric is $m_s \cdot \mathbf{I}$, where
     $\mathbf{I}$ is the identity matrix.
 
-    Methods:
-        assemble: Assemble the tensor field for a parameter vector
-        derivative: Parametric derivative of the `assemble` method
+    The callable accepts a one-element local parameter vector.
     """
 
     # ----------------------------------------------------------------------------------------------
-    def assemble(
-        self,
-        _simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtFloat[jax.Array, "num_parameters_local"],
+    def __call__(
+        self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
-        """Assemble tensor for given simplex.
-
-        the `parameters` argument is a scalar here, and `_simplex_ind` is not used.
-
-        Args:
-            _simplex_ind (int): Index of simplex under consideration (not used).
-            parameters (jax.Array): Parameter (scalar) for tensor assembly with shape (1,).
-
-        Returns:
-            jax.Array: Tensor for the simplex with shape (dim, dim).
-        """
-        tensor = parameters * jnp.identity(self.dimension, dtype=jnp.float32)
-        return tensor
-
-    # ----------------------------------------------------------------------------------------------
-    def derivative(
-        self,
-        _simplex_ind: jtInt[jax.Array, ""],
-        _parameters: jtFloat[jax.Array, "num_parameters_local"],
-    ) -> jtFloat[jax.Array, "dim dim num_local_parameters"]:
-        """Parametric derivative of the `assemble` method.
-
-        Args:
-            _simplex_ind (int): Index of simplex under consideration (not used).
-            _parameters (jax.Array): Parameter (scalar) for tensor assembly (not used).
-
-        Returns:
-            jax.Array: Jacobian tensor for the simplex under consideration with shape
-                (dim, dim, 1).
-        """
-        derivative = jnp.expand_dims(jnp.identity(self.dimension, dtype=jnp.float32), axis=-1)
-        return derivative
-
+        return parameters[0] * jnp.identity(self.dimension, dtype=jnp.float32)
 
 # ==================================================================================================
 @final
 class InvLinearScalarSimplexTensor(AbstractSimplexTensor):
     r"""SimplexTensor implementation relying on one parameter per simplex.
 
-    Given a scalar parameter $m_s$, the tensor field is assembled as
+    Given a scalar parameter $m_s$, the metric is
     $\frac{1}{m_s} \cdot \mathbf{I}$, where $\mathbf{I}$ is the identity matrix.
 
-    Methods:
-        assemble: Assemble the tensor field for a parameter vector
-        derivative: Parametric derivative of the `assemble` method
+    The callable accepts a one-element local parameter vector.
     """
 
     # ----------------------------------------------------------------------------------------------
-    def assemble(
-        self,
-        _simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtFloat[jax.Array, "num_parameters_local"],
+    def __call__(
+        self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
-        """Assemble tensor for given simplex.
-
-        The `parameters` argument is a scalar here, and `_simplex_ind` is not used.
-
-        Args:
-            _simplex_ind (int): Index of simplex under consideration (not used).
-            parameters (jax.Array): Parameter (scalar) for tensor assembly with shape (1,).
-
-        Returns:
-            jax.Array: Tensor for the simplex with shape (dim, dim).
-        """
-        tensor = 1 / parameters * jnp.identity(self.dimension, dtype=jnp.float32)
-        return tensor
-
-    # ----------------------------------------------------------------------------------------------
-    def derivative(
-        self,
-        _simplex_ind: jtInt[jax.Array, ""],
-        parameters: jtFloat[jax.Array, "num_local_parameters"],
-    ) -> jtFloat[jax.Array, "dim dim num_local_parameters"]:
-        """Parametric derivative of the `assemble` method.
-
-        Args:
-            _simplex_ind (int): Index of simplex under consideration (not used).
-            parameters (jax.Array): Parameter (scalar) for tensor assembly with shape (1,).
-
-        Returns:
-            jax.Array: Jacobian tensor for the simplex under consideration with shape
-                (dim, dim, 1).
-        """
-        derivative = (
-            -1
-            / jnp.square(parameters)
-            * jnp.expand_dims(jnp.identity(self.dimension, dtype=jnp.float32), axis=-1)
-        )
-        return derivative
-
+        return jnp.identity(self.dimension, dtype=jnp.float32) / parameters[0]
 
 # ==================================================================================================
 class TensorField(eqx.Module):
     r"""Tensor field component.
 
-    Tensor fields combine the functionality of vector-to-simplices maps and simplex tensors
-    according to the composition over inheritance principle. They constitute the full mapping
-    $\mathbf{M}(\mathbf{m})$ from the global parameter vector to the tensor field over all mesh
-    faces (simplices). In addition, they provide the parametric derivative
-    $\frac{d\mathbf{M}}{\mathbf{m}}$ of that mapping. Tensor fields are completely independent from
-    the Eikonax solver and derivator, but the output of these two components can be used to compute
-    the partial derivative $\mathbf{G}_m = \frac{du}{d\mathbf{M}}\frac{d\mathbf{M}}{\mathbf{m}}$.
+    Tensor fields gather fixed-width local parameter subsets for each simplex and call a local
+    metric module. They provide the full mapping $\mathbf{M}(\mathbf{m})$ and local VJPs without
+    materializing a global tensor-field Jacobian.
 
     Methods:
         assemble_field: Assemble the tensor field for the given parameter vector
-        assemble_jacobian: Assemble the parametric derivative $\frac{d\mathbf{M}}{\mathbf{m}}$
-            of the tensor field
+        local_vjp: Differentiate local simplex metrics with a cotangent
     """
 
     # Equinox modules are data classes, so we have to define attributes at the class level
     _num_simplices: int
-    _simplex_inds: jtInt[jax.Array, "num_simplices"]
-    _vector_to_simplices_map: AbstractVectorToSimplicesMap
+    _parameter_inds: jtInt[jax.Array, "num_simplices num_parameters_local"]
     _simplex_tensor: AbstractSimplexTensor
 
     # ----------------------------------------------------------------------------------------------
     def __init__(
         self,
-        num_simplices: int,
-        vector_to_simplices_map: AbstractVectorToSimplicesMap,
+        parameter_inds: jtInt[jax.Array | npt.NDArray, "num_simplices num_parameters_local"],
         simplex_tensor: AbstractSimplexTensor,
     ) -> None:
         """Constructor.
 
-        Takes information about the mesh simplices, a vector-to-simplices map, and a simplex tensor
-        map.
+        Takes fixed-width global parameter indices for each simplex and a local metric callable.
 
         Args:
-            num_simplices (int): Number of simplices in the mesh.
-            vector_to_simplices_map (AbstractVectorToSimplicesMap): Mapping from global to simplex
-                parameters.
-            simplex_tensor (AbstractSimplexTensor): Tensor field assembly for a given simplex.
+            parameter_inds (jax.Array | npt.NDArray): Global parameter indices for each simplex.
+            simplex_tensor (AbstractSimplexTensor): Callable local metric assembly.
         """
-        self._num_simplices = num_simplices
-        self._simplex_inds = jnp.arange(num_simplices, dtype=jnp.int32)
-        self._vector_to_simplices_map = vector_to_simplices_map
+        parameter_inds = jnp.array(parameter_inds, dtype=jnp.int32)
+        if parameter_inds.ndim != 2:
+            raise ValueError("parameter_inds must have shape (num_simplices, num_parameters_local).")
+        self._num_simplices = parameter_inds.shape[0]
+        self._parameter_inds = parameter_inds
         self._simplex_tensor = simplex_tensor
+
+    @property
+    def num_simplices(self) -> int:
+        """Number of simplices represented by the field."""
+        return self._num_simplices
+
+    @property
+    def parameter_inds(self) -> jtInt[jax.Array, "num_simplices num_parameters_local"]:
+        """Fixed-width global parameter indices for each simplex."""
+        return self._parameter_inds
 
     # ----------------------------------------------------------------------------------------------
     @eqx.filter_jit
@@ -401,8 +145,8 @@ class TensorField(eqx.Module):
     ) -> jtFloat[jax.Array, "num_simplices dim dim"]:
         """Assemble global tensor field from global parameter vector.
 
-        This method simply chains calls to the vector-to-simplices map and the simplex tensor
-        objects, vectorized over all simplices.
+        The fixed-width parameter index rows gather local parameters before vectorizing the
+        simplex tensor callable over all simplices.
 
         Args:
             parameter_vector (jax.Array | npt.NDArray): Global parameter vector.
@@ -411,96 +155,24 @@ class TensorField(eqx.Module):
             jax.Array: Global tensor field with shape (num_simplices, dim, dim).
         """
         parameter_vector = jnp.array(parameter_vector, dtype=jnp.float32)
-        vector_to_simplices_global = jax.vmap(self._vector_to_simplices_map.map, in_axes=(0, None))
-        simplex_tensor_assembly_global = jax.vmap(self._simplex_tensor.assemble, in_axes=(0, 0))
-        simplex_params = vector_to_simplices_global(self._simplex_inds, parameter_vector)
-        tensor_field = simplex_tensor_assembly_global(self._simplex_inds, simplex_params)
-
-        return tensor_field
-
-    # ----------------------------------------------------------------------------------------------
-    def assemble_jacobian(
-        self,
-        parameter_vector: jtFloat[jax.Array | npt.NDArray, "num_parameters"],
-    ) -> linalg.TensorfieldSparseTensor:
-        r"""Assemble the Jacobian $\frac{d\mathbf{M}}{d\mathbf{m}}$.
-
-        The assembly of the Jacobian matrix works via a local chaining of the `derivative` calls
-        to the simplex tensor and the vector-to-simplices map. The result is packaged into the
-        project's [`TensorfieldSparseTensor`][eikonax.linalg.TensorfieldSparseTensor] data
-        structure, which pairs derivative values with parameter indices and can be contracted
-        with other derivative tensors.
-
-        Args:
-            parameter_vector (jax.Array | npt.NDArray): Global parameter vector.
-
-        Returns:
-            eikonax.linalg.TensorfieldSparseTensor: Sparse tensor holding the Jacobian
-                $\frac{d\mathbf{M}}{d\mathbf{m}}$ with derivative values of shape
-                (num_simplices, dim, dim, num_parameters_mapped) and associated parameter indices.
-        """
-        parameter_vector = jnp.array(parameter_vector)
-        partial_derivative_values, global_parameter_inds = self._assemble_jacobian_global(
-            parameter_vector
-        )
-        partial_derivative_data = linalg.TensorfieldSparseTensor(
-            derivative_values=partial_derivative_values,
-            parameter_inds=global_parameter_inds,
-            num_parameters_global=parameter_vector.shape[0],
-        )
-
-        return partial_derivative_data
+        local_parameters = parameter_vector[self._parameter_inds]
+        return jax.vmap(self._simplex_tensor)(local_parameters)
 
     # ----------------------------------------------------------------------------------------------
     @eqx.filter_jit
-    def _assemble_jacobian_global(
-        self, parameter_vector: jtFloat[jax.Array, "num_parameters"]
-    ) -> tuple[
-        jtFloat[jax.Array, "num_simplices dim dim num_parameters_mapped"],
-        jtInt[jax.Array, "num_simplices num_parameters_mapped"],
-    ]:
-        """Intermediate call for vectorization with `vmap` in `jit` context.
-
-        Args:
-            parameter_vector (jax.Array): Global parameter vector.
-
-        Returns:
-            tuple[jax.Array, jax.Array]: Derivative values with shape
-                (num_simplices, dim, dim, num_parameters_mapped) and global parameter indices
-                with shape (num_simplices, num_parameters_mapped).
-        """
-        assemble_jacobian_global = jax.vmap(self._assemble_jacobian_local, in_axes=(0, None))
-        partial_derivative_values, global_parameter_inds = assemble_jacobian_global(
-            self._simplex_inds, parameter_vector
-        )
-
-        return partial_derivative_values, global_parameter_inds
-
-    # ----------------------------------------------------------------------------------------------
-    def _assemble_jacobian_local(
+    def local_vjp(
         self,
-        simplex_ind: jtInt[jax.Array, ""],
+        simplex_inds: jtInt[jax.Array, "num_simplices_local"],
+        cotangents: jtFloat[jax.Array, "num_simplices_local dim dim"],
         parameter_vector: jtFloat[jax.Array, "num_parameters"],
-    ) -> tuple[
-        jtFloat[jax.Array, "dim dim num_parameters_mapped"],
-        jtInt[jax.Array, "num_parameters_mapped"],
-    ]:
-        """Assembly of sparse jacobian representation for single simplex.
+    ) -> jtFloat[jax.Array, "num_simplices_local num_parameters_local"]:
+        """Apply local metric VJPs without materializing a TensorField Jacobian."""
+        simplex_inds = jnp.maximum(simplex_inds, 0)
+        local_parameters = parameter_vector[self._parameter_inds[simplex_inds]]
 
-        Args:
-            simplex_ind (jax.Array): Index of the simplex (scalar).
-            parameter_vector (jax.Array): Global parameter vector.
+        def pullback(parameters, cotangent):
+            _, vjp_fun = jax.vjp(self._simplex_tensor, parameters)
+            return vjp_fun(cotangent)[0]
 
-        Returns:
-            tuple[jax.Array, jax.Array]: Derivative values with shape
-                (dim, dim, num_parameters_mapped) and global parameter indices with shape
-                (num_parameters_mapped,).
-        """
-        local_parameters = self._vector_to_simplices_map.map(simplex_ind, parameter_vector)
-        partial_derivative_simplex = self._simplex_tensor.derivative(simplex_ind, local_parameters)
-        map_derivative_values, global_parameter_inds = self._vector_to_simplices_map.derivative(
-            simplex_ind, parameter_vector
-        )
-        partial_derivative_values = partial_derivative_simplex @ map_derivative_values
-
-        return partial_derivative_values, global_parameter_inds
+        values = jax.vmap(pullback)(local_parameters, cotangents)
+        return values

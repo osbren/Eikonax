@@ -15,23 +15,15 @@ The module defines three main sparse container classes:
    [`PartialDerivator`][eikonax.derivator.PartialDerivator]. Pairs derivative values with simplex
    adjacency information for each vertex.
 
-3. [`TensorfieldSparseTensor`][eikonax.linalg.TensorfieldSparseTensor]: Container for the Jacobian
-   $\frac{d\mathbf{M}}{d\mathbf{m}}$ computed by the
-   [`TensorField`][eikonax.tensorfield.TensorField]. Stores derivative values together with
-   parameter indices that indicate which global parameters each simplex depends on.
-
 The key operation in this module is the tensor contraction
 [`contract_derivative_tensors`][eikonax.linalg.contract_derivative_tensors], which efficiently
-combines the derivatives from the Eikonax solver and the tensor field to compute the total
-parametric derivative $\mathbf{G}_m = \mathbf{G}_M \frac{d\mathbf{M}}{d\mathbf{m}}$ required
-for gradient computation.
+combines the derivatives from the Eikonax solver with local VJPs from the tensor field to compute
+the total parametric derivative $\mathbf{G}_m = \mathbf{G}_M \frac{d\mathbf{M}}{d\mathbf{m}}$.
 
 Classes:
     DerivatorSparseTensor: Sparse tensor for partial derivatives w.r.t. metric tensors
-    TensorfieldSparseTensor: Sparse tensor for tensor field Jacobian
-
 Functions:
-    contract_derivative_tensors: Contract DerivatorSparseTensor with TensorfieldSparseTensor
+    contract_derivative_tensors: Contract DerivatorSparseTensor with local tensor-field VJPs
 """
 
 import equinox as eqx
@@ -69,55 +61,28 @@ class DerivatorSparseTensor(eqx.Module):
     adjacent_simplex_data: jtInt[jax.Array, "num_vertices max_num_neighbors"]
 
 
-class TensorfieldSparseTensor(eqx.Module):
-    r"""Sparse tensor for the tensor field Jacobian.
-
-    This container stores the Jacobian $\frac{d\mathbf{M}}{d\mathbf{m}}$ computed by the
-    [`TensorField`][eikonax.tensorfield.TensorField] component. For each simplex, it stores
-    how the metric tensor depends on the global parameters, along with indices indicating which
-    global parameters affect each simplex.
-
-    Since most tensor field parameterizations are local (each simplex depends on only a small
-    subset of global parameters), this sparse representation is much more memory-efficient than
-    storing the full dense Jacobian tensor.
-
-    Attributes:
-        derivative_values (jax.Array): Jacobian values with shape
-            (num_simplices, dim, dim, num_parameters_mapped). For each simplex, stores how the
-            (dim x dim) metric tensor changes with respect to the relevant parameters.
-        parameter_inds (jax.Array): Global parameter indices with shape
-            (num_simplices, num_parameters_mapped). Maps local parameter index to global parameter
-            index for each simplex.
-        num_parameters_global (int): Total number of global parameters in the full parameter
-            vector. Used to determine output matrix dimensions in contractions.
-    """
-
-    derivative_values: jtReal[jax.Array, "num_simplices dim dim num_parameters_mapped"]
-    parameter_inds: jtInt[jax.Array, "num_simplices num_parameters_mapped"]
-    num_parameters_global: int
-
-
 # ==================================================================================================
 @eqx.filter_jit
 def contract_derivative_tensors(
     derivative_sparse_tensor: DerivatorSparseTensor,
-    tensorfield_sparse_tensor: TensorfieldSparseTensor,
+    tensor_field,
+    parameter_vector: jtReal[jax.Array, "num_parameters"],
 ) -> sparse.BCOO:
     r"""Contract derivative tensors to compute total parametric derivative.
 
     This function performs the key operation in Eikonax's gradient computation pipeline: combining
     the partial derivatives from the solver ($\mathbf{G}_M$) with the tensor field Jacobian
-    ($\frac{d\mathbf{M}}{d\mathbf{m}}$) to obtain the total parametric derivative
-    $\mathbf{G}_m = \mathbf{G}_M \frac{d\mathbf{M}}{d\mathbf{m}}$.
+    ($\frac{d\mathbf{M}}{d\mathbf{m}}$) using local vector-Jacobian products to obtain the total
+    parametric derivative $\mathbf{G}_m = \mathbf{G}_M \frac{d\mathbf{M}}{d\mathbf{m}}$.
 
-    The contraction is performed efficiently by exploiting the sparse structure of both inputs:
+    The contraction is performed efficiently by exploiting the sparse solver derivative and the
+    fixed-width local parameter connectivity:
 
     1. For each vertex, iterate over adjacent simplices
     2. Extract the (dim x dim) derivative matrix for that vertex-simplex pair from
        `derivative_sparse_tensor`
-    3. Contract (via Einstein summation) with the corresponding (dim x dim x num_params) Jacobian
-       tensor from `tensorfield_sparse_tensor`
-    4. Map the result to the appropriate global parameter indices
+    3. Use the metric derivative as a cotangent for the tensor field's local VJP
+    4. Scatter local derivatives to the appropriate global parameter indices
     5. Assemble all contributions into a sparse matrix of shape (num_vertices, num_parameters)
 
     The operation is vectorized over all vertices using JAX's `vmap` and JIT-compiled for
@@ -126,24 +91,26 @@ def contract_derivative_tensors(
     Args:
         derivative_sparse_tensor (DerivatorSparseTensor): Partial derivatives $\mathbf{G}_M$
             from the [`PartialDerivator`][eikonax.derivator.PartialDerivator].
-        tensorfield_sparse_tensor (TensorfieldSparseTensor): Tensor field Jacobian
-            $\frac{d\mathbf{M}}{d\mathbf{m}}$ from the
-            [`TensorField`][eikonax.tensorfield.TensorField].
+        tensor_field (TensorField): Tensor field providing the local metric callable and fixed
+            global parameter indices for each simplex.
+        parameter_vector (jax.Array): Global tensor-field parameter vector.
 
     Returns:
         sparse.BCOO: Total parametric derivative $\mathbf{G}_m$ with shape
             (num_vertices, num_parameters_global). This can be transposed and multiplied with
             the adjoint vector to compute parametric gradients.
     """
-    global_contraction_function = jax.vmap(_contract_vertex_tensors, in_axes=(0, 0, None, None))
+    global_contraction_function = jax.vmap(
+        _contract_vertex_tensors, in_axes=(0, 0, None, None)
+    )
     values, col_inds = global_contraction_function(
         derivative_sparse_tensor.derivative_values,
         derivative_sparse_tensor.adjacent_simplex_data,
-        tensorfield_sparse_tensor.derivative_values,
-        tensorfield_sparse_tensor.parameter_inds,
+        tensor_field,
+        parameter_vector,
     )
     num_vertices = derivative_sparse_tensor.derivative_values.shape[0]
-    num_parameters_per_simplex = tensorfield_sparse_tensor.parameter_inds.shape[1]
+    num_parameters_per_simplex = tensor_field.parameter_inds.shape[1]
     max_num_adjacent_simplices = derivative_sparse_tensor.adjacent_simplex_data.shape[1]
     row_inds = jnp.repeat(
         jnp.arange(num_vertices), max_num_adjacent_simplices * num_parameters_per_simplex
@@ -153,7 +120,7 @@ def contract_derivative_tensors(
             values.flatten(),
             jnp.stack((row_inds, col_inds.flatten()), axis=1),
         ),
-        shape=(num_vertices, tensorfield_sparse_tensor.num_parameters_global),
+        shape=(num_vertices, parameter_vector.shape[0]),
     )
     return eikonax_sparse_matrix
 
@@ -162,8 +129,8 @@ def contract_derivative_tensors(
 def _contract_vertex_tensors(
     derivator_tensor: jtReal[jax.Array, "max_num_neighbors dim dim"],
     adjacent_simplex_data: jtInt[jax.Array, "max_num_neighbors"],
-    tensorfield_data: jtReal[jax.Array, "num_simplices dim dim num_parameters_mapped"],
-    parameter_inds: jtInt[jax.Array, "num_simplices num_parameters_mapped"],
+    tensor_field,
+    parameter_vector: jtReal[jax.Array, "num_parameters"],
 ) -> tuple[
     jtReal[jax.Array, "max_num_neighbors num_parameters_mapped"],
     jtInt[jax.Array, "max_num_neighbors num_parameters_mapped"],
@@ -199,22 +166,14 @@ def _contract_vertex_tensors(
             (max_num_neighbors, num_parameters_mapped) and corresponding column indices with
             the same shape. Entries corresponding to invalid simplices are zeroed/set to -1.
     """
-    partial_derivative_values = jnp.zeros(
-        (adjacent_simplex_data.shape[0], parameter_inds.shape[1]), dtype=jnp.float32
+    simplex_inds = jnp.maximum(adjacent_simplex_data, 0)
+    cotangents = derivator_tensor
+    values = tensor_field.local_vjp(simplex_inds, cotangents, parameter_vector)
+    valid = adjacent_simplex_data[:, None] != -1
+    values = jnp.where(valid, values, 0.0)
+    cols = jnp.broadcast_to(
+        tensor_field.parameter_inds[simplex_inds],
+        values.shape,
     )
-    partial_derivative_cols = jnp.zeros(
-        (adjacent_simplex_data.shape[0], parameter_inds.shape[1]), dtype=jnp.int32
-    )
-    for i, simplex_ind in enumerate(adjacent_simplex_data):
-        derivator_matrix = derivator_tensor[i]
-        tensorfield_tensor = tensorfield_data[simplex_ind]
-        values = jnp.einsum("ij, ijk -> k", derivator_matrix, tensorfield_tensor).flatten()
-        partial_derivative_values = partial_derivative_values.at[i, :].set(values)
-        partial_derivative_cols = partial_derivative_cols.at[i, :].set(parameter_inds[simplex_ind])
-
-    filtered_values = jnp.where(
-        adjacent_simplex_data[:, None] != -1, partial_derivative_values, 0.0
-    )
-    filtered_cols = jnp.where(adjacent_simplex_data[:, None] != -1, partial_derivative_cols, -1)
-
-    return filtered_values, filtered_cols
+    cols = jnp.where(valid, cols, -1)
+    return values, cols
