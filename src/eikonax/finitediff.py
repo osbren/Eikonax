@@ -23,7 +23,7 @@ import numpy as np
 import numpy.typing as npt
 from jaxtyping import Real as jtReal
 
-from eikonax import solver, tensorfield
+from eikonax import solver
 
 
 # ==================================================================================================
@@ -154,20 +154,19 @@ def finite_diff_2(
 def run_eikonax_with_tensorfield(
     parameter_vector: jtReal[npt.NDArray, "M"],
     eikonax_solver: solver.Solver,
-    tensor_field: tensorfield.TensorField,
+    initial_site_values: jtReal[npt.NDArray, "num_initial_sites"],
 ) -> jtReal[npt.NDArray, "N"]:
     """Wrapper function for Eikonax runs.
 
     Args:
         parameter_vector (npt.NDArray): Parameter vector at which to compute eikonal solution
         eikonax_solver (solver.Solver): Initialized solver object
-        tensor_field (tensorfield.TensorField): Initialized tensor field object
+        initial_site_values (npt.NDArray): Values for the solver's initial sites
 
     Returns:
         npt.NDArray: Solution of the Eikonal equation
     """
-    parameter_field = tensor_field.assemble_field(parameter_vector)
-    solution = eikonax_solver.run(parameter_field)
+    solution = eikonax_solver.run(parameter_vector, initial_site_values)
     solution_values = np.array(solution.values)
     return solution_values
 
@@ -175,10 +174,10 @@ def run_eikonax_with_tensorfield(
 # --------------------------------------------------------------------------------------------------
 def compute_fd_jacobian(
     eikonax_solver: solver.Solver,
-    tensor_field: tensorfield.TensorField,
     stencil: Callable,
     eval_point: jtReal[npt.NDArray | jax.Array, "M"],
     step_width: float,
+    initial_site_values: jtReal[npt.NDArray | jax.Array, "num_initial_sites"],
 ) -> jtReal[npt.NDArray, "N M"]:
     r"""Finite Difference Jacobian.
 
@@ -190,7 +189,7 @@ def compute_fd_jacobian(
 
     Args:
         eikonax_solver (solver.Solver): Initialized solver object
-        tensor_field (tensorfield.TensorField): Initialized tensor field object
+        initial_site_values (npt.NDArray | jax.Array): Values for the solver's initial sites
         stencil (Callable): Finite difference stencil to use for computation
         eval_point (npt.NDArray): Parameter vector at which to approximate derivative
         step_width (float): Step with in FD stencil
@@ -199,7 +198,9 @@ def compute_fd_jacobian(
         npt.NDArray: (Dense) Jacobian matrix
     """
     eval_func = partial(
-        run_eikonax_with_tensorfield, eikonax_solver=eikonax_solver, tensor_field=tensor_field
+        run_eikonax_with_tensorfield,
+        eikonax_solver=eikonax_solver,
+        initial_site_values=initial_site_values,
     )
     eval_point = np.array(eval_point)
     jacobian = []

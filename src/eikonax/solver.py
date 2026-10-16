@@ -20,7 +20,7 @@ from jaxtyping import Bool as jtBool
 from jaxtyping import Float as jtFloat
 from jaxtyping import Int as jtInt
 
-from . import corefunctions, logging, preprocessing
+from . import corefunctions, logging, preprocessing, tensorfield
 
 
 # ==================================================================================================
@@ -122,6 +122,7 @@ class Solver(eqx.Module):
     # Equinox modules are data classes, so specify attributes on class level
     _num_vertices: int
     _num_simplices: int
+    _tensor_field_object: tensorfield.TensorField
     _vertices: jax.Array
     _adjacency_data: jax.Array
     _loop_type: str
@@ -131,7 +132,6 @@ class Solver(eqx.Module):
     _softminmax_cutoff: Real | None
     _max_num_iterations: int
     _initial_site_inds: jax.Array
-    _initial_site_values: jax.Array
     _tolerance: Real | None
     _log_interval: int | None
     _logger: logging.Logger | None
@@ -141,7 +141,8 @@ class Solver(eqx.Module):
         self,
         mesh_data: preprocessing.MeshData,
         solver_data: SolverData,
-        initial_sites: preprocessing.InitialSites,
+        tensor_field_object: tensorfield.TensorField,
+        initial_site_inds: jtInt[jax.Array | npt.NDArray, "num_initial_sites"],
         logger: logging.Logger | None = None,
     ) -> None:
         """Constructor of the solver class.
@@ -152,14 +153,22 @@ class Solver(eqx.Module):
         Args:
             mesh_data (preprocessing.MeshData): Vertex-based mesh data.
             solver_data (SolverData): Settings for the solver.
-            initial_sites (preprocessing.InitialSites): vertices and values for source points
+            tensor_field_object (tensorfield.TensorField): Tensor field assembled from parameter
+                vectors passed to :meth:`run`.
+            initial_site_inds (jax.Array | npt.NDArray): Vertex indices for source points.
             logger (logging.Logger | None, optional): Logger object, only required for non-jitted
                 while loops. Defaults to None.
         """
         self._num_vertices = mesh_data.num_vertices
         self._num_simplices = mesh_data.num_simplices
-        self._vertices = mesh_data.vertices
-        self._adjacency_data = mesh_data.adjacency_data
+        if tensor_field_object._num_simplices != self._num_simplices:
+            raise ValueError(
+                f"Tensor field object has {tensor_field_object._num_simplices} simplices, "
+                f"but mesh has {self._num_simplices} simplices."
+            )
+        self._tensor_field_object = tensor_field_object
+        self._vertices = jnp.array(mesh_data.vertices)
+        self._adjacency_data = jnp.array(mesh_data.adjacency_data)
         self._loop_type = solver_data.loop_type
         self._max_value = solver_data.max_value
         self._use_soft_update = solver_data.use_soft_update
@@ -168,14 +177,14 @@ class Solver(eqx.Module):
         self._max_num_iterations = solver_data.max_num_iterations
         self._tolerance = solver_data.tolerance
         self._log_interval = solver_data.log_interval
-        self._initial_site_inds = initial_sites.inds
-        self._initial_site_values = initial_sites.values
+        self._initial_site_inds = jnp.array(initial_site_inds, dtype=jnp.int32)
         self._logger = logger
 
     # ----------------------------------------------------------------------------------------------
     def run(
         self,
-        tensor_field: jtFloat[jax.Array | npt.NDArray, "num_simplices dim dim"],
+        parameter_vector: jax.Array | npt.NDArray,
+        initial_site_values: jax.Array | npt.NDArray,
     ) -> Solution:
         """Main interface for conducting solver runs.
 
@@ -190,8 +199,8 @@ class Solver(eqx.Module):
             field.
 
         Args:
-            tensor_field (jax.Array): Parameter field for which to solve the Eikonal equation.
-                Provides an anisotropy tensor for each simplex of the mesh.
+            parameter_vector (jax.Array): Global tensor-field parameters.
+            initial_site_values (jax.Array): Values assigned to the configured initial sites.
 
         Raises:
             ValueError: Checks that the chosen loop type is valid.
@@ -199,25 +208,18 @@ class Solver(eqx.Module):
         Returns:
             Solution: Eikonax solution object.
         """
-        if self._num_simplices != tensor_field.shape[0]:
-            raise ValueError(
-                f"Tensor field has {tensor_field.shape[0]} simplices, "
-                f"but mesh has {self._num_simplices} simplices."
-            )
-        if self._vertices.shape[1] != tensor_field.shape[1]:
-            raise ValueError(
-                f"Vertex dimension is {self._vertices.shape[1]}, "
-                f"but tensor field has dimension {tensor_field.shape[1]}."
-            )
+        initial_site_values = jnp.array(initial_site_values, dtype=jnp.float32)
+        if initial_site_values.shape != self._initial_site_inds.shape:
+            raise ValueError("Initial site values must have one value per initial site index.")
         if (
             not (self._initial_site_inds >= 0).all()
             or not (self._initial_site_inds < self._num_vertices).all()
         ):
             raise ValueError("Initial site indices need to be in the range [0, num_vertices-1].")
 
-        tensor_field = jnp.array(tensor_field, dtype=jnp.float32)
+        tensor_field = self._tensor_field_object.assemble_field(parameter_vector)
         initial_guess = jnp.ones(self._vertices.shape[0]) * self._max_value
-        initial_guess = initial_guess.at[self._initial_site_inds].set(self._initial_site_values)
+        initial_guess = initial_guess.at[self._initial_site_inds].set(initial_site_values)
 
         match self._loop_type:
             case "jitted_for":
@@ -227,7 +229,7 @@ class Solver(eqx.Module):
             case "nonjitted_while":
                 run_function = self._run_nonjitted_while_loop
             case _:
-                raise ValueError(f"Invalid loop type: {self._.loop_type}")
+                raise ValueError(f"Invalid loop type: {self._loop_type}")
 
         solution_vector, num_iterations, tolerance = run_function(initial_guess, tensor_field)
         assert solution_vector.shape[0] == self._vertices.shape[0], (
