@@ -192,3 +192,23 @@ def test_derivative_solver_vs_finite_differences(setup_derivative_solve_checks):
     )
     error = np.linalg.norm(finite_diff_jacobian - eikonax_jacobian)
     assert error < 2e-3
+
+
+# --------------------------------------------------------------------------------------------------
+@pytest.mark.slow
+def test_solver_run_supports_jax_grad(setup_derivative_solve_checks):
+    (
+        parameter_vector,
+        solution_vector,
+        _,
+        eikonal_solver,
+        derivative_solver,
+        partial_derivative_parameter,
+    ) = setup_derivative_solve_checks
+    expected_gradient = partial_derivative_parameter.T @ derivative_solver.solve(
+        jnp.ones_like(solution_vector)
+    )
+    gradient = jax.grad(lambda parameters: eikonal_solver.run(parameters, jnp.array([0.0])).values.sum())(
+        parameter_vector
+    )
+    assert np.allclose(gradient, expected_gradient, atol=2e-3)
