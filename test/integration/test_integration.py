@@ -42,19 +42,25 @@ def test_solver_loop_types(configurations_and_tensorfields_2d_uniform):
         logfile_path=None,
     )
     logger = logging.Logger(logger_data)
-    config, tensor_field = configurations_and_tensorfields_2d_uniform
-    *_, mesh_data, solver_data, initial_sites = config
+    config, _, parameter_vector = configurations_and_tensorfields_2d_uniform
+    *_, mesh_data, solver_data, initial_site_inds, initial_site_values, tensor_field_object = config
     solver_data_jitted_while = solver_data
     solver_data_nonjitted_while = copy.deepcopy(solver_data)
     solver_data_nonjitted_while.loop_type = "nonjitted_while"
     solver_data_jitted_for = copy.deepcopy(solver_data)
     solver_data_jitted_for.loop_type = "jitted_for"
-    eikonax_solver = solver.Solver(mesh_data, solver_data_jitted_while, initial_sites)
-    solution_jitted_while = eikonax_solver.run(np.linalg.inv(tensor_field))
-    eikonax_solver = solver.Solver(mesh_data, solver_data_nonjitted_while, initial_sites, logger)
-    solution_nonjitted_while = eikonax_solver.run(np.linalg.inv(tensor_field))
-    eikonax_solver = solver.Solver(mesh_data, solver_data_jitted_for, initial_sites)
-    solution_jitted_for = eikonax_solver.run(np.linalg.inv(tensor_field))
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data_jitted_while, tensor_field_object, initial_site_inds
+    )
+    solution_jitted_while = eikonax_solver.run(parameter_vector, initial_site_values)
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data_nonjitted_while, tensor_field_object, initial_site_inds, logger
+    )
+    solution_nonjitted_while = eikonax_solver.run(parameter_vector, initial_site_values)
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data_jitted_for, tensor_field_object, initial_site_inds
+    )
+    solution_jitted_for = eikonax_solver.run(parameter_vector, initial_site_values)
     assert np.allclose(solution_jitted_while.values, solution_nonjitted_while.values)
     assert np.allclose(solution_jitted_while.values, solution_jitted_for.values)
 
@@ -62,36 +68,42 @@ def test_solver_loop_types(configurations_and_tensorfields_2d_uniform):
 # --------------------------------------------------------------------------------------------------
 @pytest.mark.slow
 def test_solver_run_2d_uniform_tensorfield(configurations_and_tensorfields_2d_uniform):
-    config, tensor_field = configurations_and_tensorfields_2d_uniform
-    simplices, vertices, mesh_data, solver_data, initial_sites = config
+    config, tensor_field, parameter_vector = configurations_and_tensorfields_2d_uniform
+    simplices, vertices, mesh_data, solver_data, initial_site_inds, initial_site_values, tensor_field_object = config
     fimpython_solver = create_fim_solver(vertices, simplices, tensor_field, use_active_list=False)
-    fimpython_solution = fimpython_solver.comp_fim(initial_sites.inds, initial_sites.values)
-    eikonax_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-    eikonax_solution = eikonax_solver.run(np.linalg.inv(tensor_field))
+    fimpython_solution = fimpython_solver.comp_fim(initial_site_inds, initial_site_values)
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data, tensor_field_object, initial_site_inds
+    )
+    eikonax_solution = eikonax_solver.run(parameter_vector, initial_site_values)
     assert np.allclose(fimpython_solution, np.array(eikonax_solution.values), atol=1e-4)
 
 
 # --------------------------------------------------------------------------------------------------
 @pytest.mark.slow
 def test_solver_run_2d_random_tensorfield(configurations_and_tensorfields_2d_random):
-    config, tensor_field = configurations_and_tensorfields_2d_random
-    simplices, vertices, mesh_data, solver_data, initial_sites = config
+    config, tensor_field, parameter_vector = configurations_and_tensorfields_2d_random
+    simplices, vertices, mesh_data, solver_data, initial_site_inds, initial_site_values, tensor_field_object = config
     fimpython_solver = create_fim_solver(vertices, simplices, tensor_field, use_active_list=False)
-    fimpython_solution = fimpython_solver.comp_fim(initial_sites.inds, initial_sites.values)
-    eikonax_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-    eikonax_solution = eikonax_solver.run(np.linalg.inv(tensor_field))
+    fimpython_solution = fimpython_solver.comp_fim(initial_site_inds, initial_site_values)
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data, tensor_field_object, initial_site_inds
+    )
+    eikonax_solution = eikonax_solver.run(parameter_vector, initial_site_values)
     assert np.allclose(fimpython_solution, np.array(eikonax_solution.values), atol=1e-4)
 
 
 # --------------------------------------------------------------------------------------------------
 @pytest.mark.slow
 def test_solver_run_2d_function_tensorfield(configurations_and_tensorfields_2d_function):
-    config, tensor_field = configurations_and_tensorfields_2d_function
-    simplices, vertices, mesh_data, solver_data, initial_sites = config
+    config, tensor_field, parameter_vector = configurations_and_tensorfields_2d_function
+    simplices, vertices, mesh_data, solver_data, initial_site_inds, initial_site_values, tensor_field_object = config
     fimpython_solver = create_fim_solver(vertices, simplices, tensor_field, use_active_list=False)
-    fimpython_solution = fimpython_solver.comp_fim(initial_sites.inds, initial_sites.values)
-    eikonax_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-    eikonax_solution = eikonax_solver.run(np.linalg.inv(tensor_field))
+    fimpython_solution = fimpython_solver.comp_fim(initial_site_inds, initial_site_values)
+    eikonax_solver = solver.Solver(
+        mesh_data, solver_data, tensor_field_object, initial_site_inds
+    )
+    eikonax_solution = eikonax_solver.run(parameter_vector, initial_site_values)
     assert np.allclose(fimpython_solution, np.array(eikonax_solution.values), atol=1e-4)
 
 
@@ -101,18 +113,20 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
     input_data, fwd_solution, expected_partial_derivatives = (
         setup_analytical_partial_derivative_tests
     )
-    vertices, simplices, parameter_vector, tensor_field, initial_sites, derivator_data = input_data
-    initial_sites = preprocessing.InitialSites(**initial_sites)
+    (
+        vertices,
+        simplices,
+        parameter_vector,
+        tensor_field,
+        initial_site_inds,
+        tensor_field_object,
+        derivator_data,
+    ) = input_data
     derivator_data = derivator.PartialDerivatorData(**derivator_data)
     mesh_data = preprocessing.MeshData(vertices=vertices, simplices=simplices)
-    tensor_on_simplex = tensorfield.InvLinearScalarSimplexTensor(dimension=vertices.shape[1])
-    tensor_field_mapping = tensorfield.LinearScalarMap()
-    tensor_field_object = tensorfield.TensorField(
-        num_simplices=simplices.shape[0],
-        vector_to_simplices_map=tensor_field_mapping,
-        simplex_tensor=tensor_on_simplex,
+    eikonax_derivator = derivator.PartialDerivator(
+        mesh_data, derivator_data, initial_site_inds
     )
-    eikonax_derivator = derivator.PartialDerivator(mesh_data, derivator_data, initial_sites)
     tensor_partial_parameter = tensor_field_object.assemble_jacobian(parameter_vector)
     output_partial_solution, output_partial_tensor = eikonax_derivator.compute_partial_derivatives(
         fwd_solution, tensor_field
@@ -170,10 +184,10 @@ def test_derivative_solver_vs_finite_differences(setup_derivative_solve_checks):
     assert isinstance(eikonax_jacobian, jax.Array)
     finite_diff_jacobian = finitediff.compute_fd_jacobian(
         eikonax_solver=eikonal_solver,
-        tensor_field=tensor_field,
         stencil=finitediff.finite_diff_1_forward,
         eval_point=parameter_vector,
         step_width=1e-3,
+        initial_site_values=np.array([0.0]),
     )
     error = np.linalg.norm(finite_diff_jacobian - eikonax_jacobian)
     assert error < 2e-3

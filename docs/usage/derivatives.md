@@ -97,9 +97,14 @@ solver_data = solver.SolverData(
     softminmax_order=10,
     softminmax_cutoff=0.01,
 )
-initial_sites = preprocessing.InitialSites(inds=(0,), values=(0,))
-eikonax_solver = solver.Solver(mesh_data, solver_data, initial_sites)
-solution = eikonax_solver.run(tensor_field_instance)
+initial_site_inds = jnp.array((0,), dtype=jnp.int32)
+eikonax_solver = solver.Solver(
+    mesh_data,
+    solver_data,
+    tensor_field_object,
+    initial_site_inds=initial_site_inds,
+)
+solution = eikonax_solver.run(parameter_vector, initial_site_values=jnp.array([0.0]))
 ```
 
 ## Partial Derivatives
@@ -124,7 +129,7 @@ derivator_data = derivator.PartialDerivatorData(
     softminmax_order=None,
     softminmax_cutoff=None,
 )
-eikonax_derivator = derivator.PartialDerivator(mesh_data, derivator_data, initial_sites)
+eikonax_derivator = derivator.PartialDerivator(mesh_data, derivator_data, initial_site_inds)
 ```
 
 We can obtain sparse representations (through local dependencies) of the partial derivatives via
@@ -230,10 +235,10 @@ errors = []
 for step_width in step_widths:
     finite_diff_jacobian = finitediff.compute_fd_jacobian(
         eikonax_solver=eikonal_solver,
-        tensor_field=tensor_field_object,
         stencil=finitediff.finite_diff_1_forward,
         eval_point=parameter_vector,
         step_width=step_width,
+        initial_site_values=jnp.array([0.0]),
     )
     error = np.linalg.norm(finite_diff_jacobian - eikonax_jacobian)
     errors.append(error)
