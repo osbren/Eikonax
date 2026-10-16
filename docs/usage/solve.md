@@ -108,8 +108,7 @@ The tensor-field mapping is owned by the solver. For the scalar field above, use
 simplex and provide the inverse-speed values as the parameter vector:
 ```py
 tensor_field_object = tensorfield.TensorField(
-    num_simplices=simplices.shape[0],
-    vector_to_simplices_map=tensorfield.LinearScalarMap(),
+    parameter_inds=jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
     simplex_tensor=tensorfield.LinearScalarSimplexTensor(dimension=2),
 )
 eikonax_solver = solver.Solver(
