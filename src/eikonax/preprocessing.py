@@ -6,7 +6,6 @@
 
 Classes:
     MeshData: Data characterizing a computational mesh from a vertex-centered perspective.
-    InitialSites: Initial site info.
 
 Functions:
     create_test_mesh: Create a simple test mesh with Scipy's Delauny functionality.
@@ -66,29 +65,6 @@ class MeshData:
         self.adjacency_data = get_adjacency_data(self.simplices, self.num_vertices)
         self.vertices = jnp.array(self.vertices, dtype=jnp.float32)
         self.simplices = jnp.array(self.simplices, dtype=jnp.int32)
-
-
-@dataclass
-class InitialSites:
-    """Initial site info.
-
-    For a unique solution of the state-constrained Eikonal equation, the solution values need to be
-    given a number of initial points (at least one). Multiple initial sites need to be compatible,
-    in the sense that the arrival time from another source is not smaller than the initial value
-    itself.
-
-    Attributes:
-        inds (jax.Array | npt.NDArray): The indices of the nodes where the initial sites are placed.
-        values (jax.Array | npt.NDArray): The values of the initial sites.
-    """
-
-    inds: jtInt[jax.Array | npt.NDArray, "num_initial_sites"] | Iterable
-    values: jtFloat[jax.Array | npt.NDArray, "num_initial_sites"] | Iterable
-
-    def __post_init__(self) -> None:
-        """Convert to jax arrays."""
-        self.inds = jnp.array(self.inds, dtype=jnp.int32)
-        self.values = jnp.array(self.values, dtype=jnp.float32)
 
 
 # ==================================================================================================
