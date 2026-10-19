@@ -188,7 +188,7 @@ class Solver(eqx.Module):
         self._max_num_iterations = solver_data.max_num_iterations
         self._tolerance = solver_data.tolerance
         self._log_interval = solver_data.log_interval
-        self._initial_site_inds = jnp.array(initial_site_inds, dtype=jnp.int32)
+        self._initial_site_inds = jnp.asarray(initial_site_inds)
         if not np.all((self._initial_site_inds >= 0) & (self._initial_site_inds < self._num_vertices)):
             raise ValueError("Initial site indices need to be in the range [0, num_vertices-1].")
         self._logger = logger
@@ -221,11 +221,11 @@ class Solver(eqx.Module):
         Returns:
             Solution: Eikonax solution object.
         """
-        initial_site_values = jnp.array(initial_site_values, dtype=jnp.float32)
+        initial_site_values = jnp.asarray(initial_site_values)
         if initial_site_values.shape != self._initial_site_inds.shape:
             raise ValueError("Initial site values must have one value per initial site index.")
         solution_vector, num_iterations, tolerance = _run_values_custom(
-            (jnp.array(parameter_vector, dtype=jnp.float32), initial_site_values),
+            (jnp.asarray(parameter_vector), initial_site_values),
             self,
         )
         assert solution_vector.shape[0] == self._vertices.shape[0], (
@@ -245,7 +245,7 @@ class Solver(eqx.Module):
     ) -> tuple[jtFloat[jax.Array, "num_vertices"], int | jax.Array, float | jax.Array]:
         """Run the forward solver without the public input validation."""
         tensor_field = self._tensor_field_object.assemble_field(parameter_vector)
-        initial_guess = jnp.ones(self._vertices.shape[0], dtype=jnp.float32) * self._max_value
+        initial_guess = jnp.ones(self._vertices.shape[0], dtype=parameter_vector.dtype) * self._max_value
         initial_guess = jnp.asarray(initial_guess).at[self._initial_site_inds].set(
             initial_site_values
         )

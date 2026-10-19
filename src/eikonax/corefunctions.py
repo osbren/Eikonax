@@ -161,7 +161,9 @@ def compute_optimal_update_parameters_soft(
         -1,
         lambda_2_clipped,
     )
-    lambda_array = jnp.array((0, 1, lambda_1_clipped, lambda_2_clipped), dtype=jnp.float32)
+    lambda_array = jnp.asarray(
+        (0, 1, lambda_1_clipped, lambda_2_clipped), dtype=parameter_tensor.dtype
+    )
     return lambda_array
 
 
@@ -203,7 +205,9 @@ def compute_optimal_update_parameters_hard(
         -1,
         lambda_2,
     )
-    lambda_array = jnp.array((0, 1, lambda_1_clipped, lambda_2_clipped), dtype=jnp.float32)
+    lambda_array = jnp.asarray(
+        (0, 1, lambda_1_clipped, lambda_2_clipped), dtype=parameter_tensor.dtype
+    )
     return lambda_array
 
 
@@ -332,7 +336,7 @@ def compute_update_candidates_from_adjacent_simplex(
             triangle
     """
     i, j, k, s = adjacency_data
-    solution_values = jnp.array((old_solution_vector[j], old_solution_vector[k]), dtype=jnp.float32)
+    solution_values = jnp.asarray((old_solution_vector[j], old_solution_vector[k]))
     edges = compute_edges(i, j, k, vertices)
     parameter_tensor = tensor_field[s]
     if use_soft_update:
@@ -384,8 +388,10 @@ def compute_vertex_update_candidates(
             with jnp.inf
     """
     max_num_adjacent_simplices = adjacency_data.shape[0]
-    vertex_update_candidates = jnp.zeros((max_num_adjacent_simplices, 4), dtype=jnp.float32)
-    lambda_arrays = jnp.zeros((max_num_adjacent_simplices, 4), dtype=jnp.float32)
+    vertex_update_candidates = jnp.zeros(
+        (max_num_adjacent_simplices, 4), dtype=old_solution_vector.dtype
+    )
+    lambda_arrays = jnp.zeros((max_num_adjacent_simplices, 4), dtype=old_solution_vector.dtype)
 
     for i, indices in enumerate(adjacency_data):
         simplex_update_candidates, lambda_array_candidates = (

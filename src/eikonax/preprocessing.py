@@ -63,8 +63,8 @@ class MeshData:
         self.num_vertices = self.vertices.shape[0]
         self.num_simplices = self.simplices.shape[0]
         self.adjacency_data = get_adjacency_data(self.simplices, self.num_vertices)
-        self.vertices = jnp.array(self.vertices, dtype=jnp.float32)
-        self.simplices = jnp.array(self.simplices, dtype=jnp.int32)
+        self.vertices = jnp.asarray(self.vertices)
+        self.simplices = jnp.asarray(self.simplices)
 
 
 # ==================================================================================================
@@ -133,7 +133,7 @@ def get_adjacency_data(
     """
     max_num_adjacent_simplices = np.max(np.bincount(simplices.flatten()))
     adjacent_vertex_inds = -1 * np.ones(
-        (num_vertices, max_num_adjacent_simplices, 4), dtype=np.int32
+        (num_vertices, max_num_adjacent_simplices, 4), dtype=simplices.dtype
     )
     counter_array = np.zeros(num_vertices, dtype=int)
     node_permutations = ((0, 1, 2), (1, 0, 2), (2, 0, 1))
@@ -145,6 +145,6 @@ def get_adjacency_data(
                 [center_vertex, adj_vertex_1, adj_vertex_2, simplex_inds]
             )
             counter_array[center_vertex] += 1
-    adjacent_vertex_inds = jnp.array(adjacent_vertex_inds, dtype=jnp.int32)
+    adjacent_vertex_inds = jnp.asarray(adjacent_vertex_inds)
 
     return adjacent_vertex_inds

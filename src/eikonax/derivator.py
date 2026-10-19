@@ -102,7 +102,7 @@ class PartialDerivator(eqx.Module):
         self._num_simplices = mesh_data.num_simplices
         self._vertices = mesh_data.vertices
         self._adjacency_data = mesh_data.adjacency_data
-        self._initial_site_inds = jnp.array(initial_site_inds, dtype=jnp.int32)
+        self._initial_site_inds = jnp.asarray(initial_site_inds)
         self._use_soft_update = derivator_data.use_soft_update
         self._softminmax_order = derivator_data.softminmax_order
         self._softminmax_cutoff = derivator_data.softminmax_cutoff
@@ -146,8 +146,8 @@ class PartialDerivator(eqx.Module):
                 per-vertex derivative values with shape (N_V, N_S_adj, d, d) and index
                 information for adjacent simplices.
         """
-        solution_vector = jnp.array(solution_vector, dtype=jnp.float32)
-        tensor_field = jnp.array(tensor_field, dtype=jnp.float32)
+        solution_vector = jnp.asarray(solution_vector)
+        tensor_field = jnp.asarray(tensor_field)
         partial_derivative_solution, partial_derivative_parameter = (
             self._compute_global_partial_derivatives(
                 solution_vector,
@@ -361,10 +361,10 @@ class PartialDerivator(eqx.Module):
         max_num_adjacent_simplices = adjacency_data.shape[0]
         tensor_dim = tensor_field.shape[1]
         grad_update_solution_candidates = jnp.zeros(
-            (max_num_adjacent_simplices, 4, 2), dtype=jnp.float32
+            (max_num_adjacent_simplices, 4, 2), dtype=solution_vector.dtype
         )
         grad_update_parameter_candidates = jnp.zeros(
-            (max_num_adjacent_simplices, 4, tensor_dim, tensor_dim), dtype=jnp.float32
+            (max_num_adjacent_simplices, 4, tensor_dim, tensor_dim), dtype=tensor_field.dtype
         )
 
         for i, indices in enumerate(adjacency_data):
@@ -644,7 +644,7 @@ class DerivativeSolver:
                 representing $\mathbf{G}_u$.
         """
         num_points = solution.size
-        solution = jnp.array(solution, dtype=jnp.float32)
+        solution = jnp.asarray(solution)
         self._permutation_indices = self._assemble_permutation_indices(solution)
         self._inverse_permutation_indices = jnp.argsort(self._permutation_indices)
         self._sparse_system_matrix = self._assemble_system_matrix(
@@ -674,11 +674,13 @@ class DerivativeSolver:
             jax.Array: Solution of the linear system solve, corresponding to the adjoint in an
                 optimization context.
         """
-        right_hand_side = jnp.array(right_hand_side, dtype=jnp.float32)
+        right_hand_side = jnp.asarray(right_hand_side)
         permutated_right_hand_side = self._permute(right_hand_side)
         operator = lx.FunctionLinearOperator(
             lambda vector: self._sparse_system_matrix @ vector,
-            jax.ShapeDtypeStruct((self._sparse_system_matrix.shape[0],), jnp.float32),
+            jax.ShapeDtypeStruct(
+                (self._sparse_system_matrix.shape[0],), self._sparse_system_matrix.dtype
+            ),
             tags=(lx.upper_triangular_tag, lx.unit_diagonal_tag),
         )
         result = lx.linear_solve(
@@ -730,7 +732,11 @@ class DerivativeSolver:
             num_points (int): Number of points (vertices) in the system; used to build
                 the identity matrix and shape the final system matrix.
         """
-        sparse_identity_matrix = sparse.eye(num_points, dtype=jnp.float32)
+        sparse_identity_matrix = sparse.eye(
+            num_points, 
+            dtype=sparse_partial_update_solution.dtype, 
+            index_dtype=sparse_partial_update_solution.indices.dtype
+        )
         sparse_system_matrix = (
             sparse_identity_matrix - sparse_partial_update_solution
         ).T

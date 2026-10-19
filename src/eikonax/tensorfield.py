@@ -71,7 +71,7 @@ class LinearScalarSimplexTensor(AbstractSimplexTensor):
     def assemble(
         self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
-        return parameters[0] * jnp.identity(self.dimension, dtype=jnp.float32)
+        return parameters[0] * jnp.identity(self.dimension, dtype=parameters.dtype)
 
 # ==================================================================================================
 @final
@@ -88,7 +88,7 @@ class InvLinearScalarSimplexTensor(AbstractSimplexTensor):
     def assemble(
         self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
-        return jnp.identity(self.dimension, dtype=jnp.float32) / parameters[0]
+        return jnp.identity(self.dimension, dtype=parameters.dtype) / parameters[0]
 
 # ==================================================================================================
 class TensorField(eqx.Module):
@@ -122,7 +122,7 @@ class TensorField(eqx.Module):
             parameter_inds (jax.Array | npt.NDArray): Global parameter indices for each simplex.
             simplex_tensor (AbstractSimplexTensor): Local metric assembly module.
         """
-        parameter_inds = jnp.array(parameter_inds, dtype=jnp.int32)
+        parameter_inds = jnp.asarray(parameter_inds)
         if parameter_inds.ndim != 2:
             raise ValueError("parameter_inds must have shape (num_simplices, num_parameters_local).")
         self._num_simplices = parameter_inds.shape[0]
@@ -155,7 +155,7 @@ class TensorField(eqx.Module):
         Returns:
             jax.Array: Global tensor field with shape (num_simplices, dim, dim).
         """
-        parameter_vector = jnp.array(parameter_vector, dtype=jnp.float32)
+        parameter_vector = jnp.asarray(parameter_vector)
         local_parameters = parameter_vector[self._parameter_inds]
         return jax.vmap(self._simplex_tensor.assemble)(local_parameters)
 
