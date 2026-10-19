@@ -212,3 +212,40 @@ def test_solver_run_supports_jax_grad(setup_derivative_solve_checks):
         parameter_vector
     )
     assert np.allclose(gradient, expected_gradient, atol=2e-3)
+
+
+# --------------------------------------------------------------------------------------------------
+@pytest.mark.slow
+def test_solver_supports_64_bit_precision():
+    previous_x64_enabled = jax.config.x64_enabled
+    jax.config.update("jax_enable_x64", True)
+    try:
+        vertices, simplices = preprocessing.create_test_mesh((0, 1), (0, 1), 3, 3)
+        mesh_data = preprocessing.MeshData(vertices, simplices)
+        solver_data = solver.SolverData(
+            loop_type="jitted_while",
+            max_value=1000,
+            use_soft_update=True,
+            softminmax_order=20,
+            softminmax_cutoff=1,
+            max_num_iterations=1000,
+            tolerance=1e-8,
+        )
+        tensor_field = tensorfield.TensorField(
+            jnp.arange(mesh_data.num_simplices)[:, None],
+            tensorfield.InvLinearScalarSimplexTensor(2),
+        )
+        eikonax_solver = solver.Solver(mesh_data, solver_data, tensor_field, jnp.array([0]))
+        parameter_vector = jnp.ones(mesh_data.num_simplices, dtype=jnp.float64)
+        solution = eikonax_solver.run(parameter_vector, jnp.array([0.0], dtype=jnp.float64))
+        gradient = jax.grad(
+            lambda parameters: eikonax_solver.run(
+                parameters, jnp.array([0.0], dtype=jnp.float64)
+            ).values.sum()
+        )(parameter_vector)
+        assert jax.config.x64_enabled
+        assert parameter_vector.dtype == jnp.float64
+        assert solution.values.dtype == jnp.float64
+        assert gradient.dtype == jnp.float64
+    finally:
+        jax.config.update("jax_enable_x64", previous_x64_enabled)
