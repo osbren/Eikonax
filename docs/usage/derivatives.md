@@ -44,11 +44,11 @@ and its derivative. Such a mapping is provided by the [tensorfield][eikonax.tens
 The [`SimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor] describes how a local parameter
 vector $\mathbf{m}_s$ is mapped to the tensor $M_s$ for a simplex. The
 [`TensorField`][eikonax.tensorfield.TensorField] gathers each simplex's local parameters using its
-fixed-width `parameter_inds` array and applies the local tensor callable.
+fixed-width `parameter_inds` array and applies the local tensor's `assemble` method.
 
 !!! info
     This structure keeps parameter connectivity explicit while allowing arbitrary differentiable
-    local tensor callables, which are vectorized and differentiated by JAX.
+    local tensor assembly methods, which are vectorized and differentiated by JAX.
 
 In our example, we define local tensors with the built-in [InvLinearScalarSimplexTensor][eikonax.tensorfield.InvLinearScalarSimplexTensor]. This assembles the local tensor from a scalar $m_s > 0$
 simply as $\mathbf{M}_s = \frac{1}{m_s}\mathbf{I}$. The fixed parameter-index array selects
@@ -151,7 +151,7 @@ simplex indices.
 
 The total derivative $\mathbf{G}_m$ is computed with local vector-Jacobian products. The tensor
 field uses its fixed-width `parameter_inds` array to select the parameters for each simplex, and
-JAX differentiates the local metric callable directly. No dense TensorField Jacobian is formed.
+JAX differentiates the local metric assembly method directly. No dense TensorField Jacobian is formed.
 We can obtain $\mathbf{G}_m$ via the tensor contraction function provided by Eikonax,
 ```py
 from eikonax import linalg
