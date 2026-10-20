@@ -1,14 +1,15 @@
 r"""Composable and differentiable parameter tensor fields.
 
-This module provides callable local metric modules for differentiable parameter fields. Recall that
+This module provides local metric modules for differentiable parameter fields. Recall that
 for the Eikonax solver, and particularly parametric derivatives, we require an input tensor field
 $\mathbf{M}: \mathbb{R}^M \times \mathbb{N}_0 \to \mathbb{S}_+^{d\times d}$. This means that the
 tensor field is a mapping $\mathbf{M}(\mathbf{m},s)$ that assigns, given a global parameter vector
 $\mathbf{m}$, an s.p.d tensor to every simplex $s$ in the mesh. To allow for sufficient flexibility
 in the choice of tensor field, each simplex uses a fixed-width row of `parameter_inds` to gather
 its local parameters. An [`AbstractSimplexTensor`][eikonax.tensorfield.AbstractSimplexTensor]
-callable maps those local parameters to the simplex metric. [`TensorField`][eikonax.tensorfield.TensorField]
-vectorizes the callable and uses local JAX VJPs for derivative contractions.
+``assemble`` method maps those local parameters to the simplex metric.
+[`TensorField`][eikonax.tensorfield.TensorField] vectorizes the method and uses local JAX VJPs
+for derivative contractions.
 
 Classes:
     AbstractSimplexTensor: ABC interface contract for local simplex metrics
@@ -32,7 +33,7 @@ from jaxtyping import Real as jtReal
 class AbstractSimplexTensor(eqx.Module):
     """ABC interface contract for local simplex metrics.
 
-    `SimplexTensor` components map local parameters to a metric tensor. The relevant parameters are
+    `SimplexTensor` components assemble local parameters into a metric tensor. The relevant parameters are
     gathered from the global parameter vector using the TensorField's fixed-width
     ``parameter_inds`` array.
 
@@ -42,14 +43,14 @@ class AbstractSimplexTensor(eqx.Module):
         actual tensor field in the eikonal equation.
 
     Methods:
-        __call__: Map local parameters to one simplex metric
+        assemble: Assemble local parameters into one simplex metric
     """
 
     @abstractmethod
-    def __call__(
+    def assemble(
         self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
-        """Map local parameters to one simplex metric."""
+        """Assemble local parameters into one simplex metric."""
         raise NotImplementedError
 
     # Equinox modules are data classes, so we have to define attributes at the class level
@@ -63,11 +64,11 @@ class LinearScalarSimplexTensor(AbstractSimplexTensor):
     Given a scalar parameter $m_s$, the metric is $m_s \cdot \mathbf{I}$, where
     $\mathbf{I}$ is the identity matrix.
 
-    The callable accepts a one-element local parameter vector.
+    The ``assemble`` method accepts a one-element local parameter vector.
     """
 
     # ----------------------------------------------------------------------------------------------
-    def __call__(
+    def assemble(
         self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
         return parameters[0] * jnp.identity(self.dimension, dtype=jnp.float32)
@@ -80,11 +81,11 @@ class InvLinearScalarSimplexTensor(AbstractSimplexTensor):
     Given a scalar parameter $m_s$, the metric is
     $\frac{1}{m_s} \cdot \mathbf{I}$, where $\mathbf{I}$ is the identity matrix.
 
-    The callable accepts a one-element local parameter vector.
+    The ``assemble`` method accepts a one-element local parameter vector.
     """
 
     # ----------------------------------------------------------------------------------------------
-    def __call__(
+    def assemble(
         self, parameters: jtFloat[jax.Array, "num_parameters_local"]
     ) -> jtFloat[jax.Array, "dim dim"]:
         return jnp.identity(self.dimension, dtype=jnp.float32) / parameters[0]
@@ -119,7 +120,7 @@ class TensorField(eqx.Module):
 
         Args:
             parameter_inds (jax.Array | npt.NDArray): Global parameter indices for each simplex.
-            simplex_tensor (AbstractSimplexTensor): Callable local metric assembly.
+            simplex_tensor (AbstractSimplexTensor): Local metric assembly module.
         """
         parameter_inds = jnp.array(parameter_inds, dtype=jnp.int32)
         if parameter_inds.ndim != 2:
@@ -146,7 +147,7 @@ class TensorField(eqx.Module):
         """Assemble global tensor field from global parameter vector.
 
         The fixed-width parameter index rows gather local parameters before vectorizing the
-        simplex tensor callable over all simplices.
+        simplex tensor assembly method over all simplices.
 
         Args:
             parameter_vector (jax.Array | npt.NDArray): Global parameter vector.
@@ -156,7 +157,7 @@ class TensorField(eqx.Module):
         """
         parameter_vector = jnp.array(parameter_vector, dtype=jnp.float32)
         local_parameters = parameter_vector[self._parameter_inds]
-        return jax.vmap(self._simplex_tensor)(local_parameters)
+        return jax.vmap(self._simplex_tensor.assemble)(local_parameters)
 
     # ----------------------------------------------------------------------------------------------
     @eqx.filter_jit
@@ -171,7 +172,7 @@ class TensorField(eqx.Module):
         local_parameters = parameter_vector[self._parameter_inds[simplex_inds]]
 
         def pullback(parameters, cotangent):
-            _, vjp_fun = jax.vjp(self._simplex_tensor, parameters)
+            _, vjp_fun = jax.vjp(self._simplex_tensor.assemble, parameters)
             return vjp_fun(cotangent)[0]
 
         values = jax.vmap(pullback)(local_parameters, cotangents)
