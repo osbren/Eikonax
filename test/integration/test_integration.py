@@ -1,5 +1,6 @@
 import copy
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -166,6 +167,7 @@ def test_derivative_solver_vs_finite_differences(setup_derivative_solve_checks):
     eikonax_jacobian = derivator.compute_eikonax_jacobian(
         derivative_solver, partial_derivative_parameter
     )
+    assert isinstance(eikonax_jacobian, jax.Array)
     finite_diff_jacobian = finitediff.compute_fd_jacobian(
         eikonax_solver=eikonal_solver,
         tensor_field=tensor_field,

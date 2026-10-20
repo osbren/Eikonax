@@ -20,7 +20,6 @@ from typing import Annotated
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 import numpy.typing as npt
 import lineax as lx
 from jax.experimental import sparse
@@ -760,7 +759,7 @@ class DerivativeSolver:
 def compute_eikonax_jacobian(
     derivative_solver: DerivativeSolver,
     partial_derivative_parameter: sparse.BCOO,
-) -> npt.NDArray:
+) -> jtFloat[jax.Array, "num_vertices num_parameters"]:
     """Compute Jacobian from concatenation of gradients, computed with unit vector RHS.
 
     !!! warning
@@ -774,20 +773,19 @@ def compute_eikonax_jacobian(
             vector/parameters.
 
     Returns:
-        npt.NDArray: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
+        jax.Array: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
             the full dense Jacobian and is intended only for small problems.
     """
-    rhs_adjoint = np.zeros(derivative_solver.sparse_system_matrix.shape[0])
+    rhs_adjoint = jnp.zeros(derivative_solver.sparse_system_matrix.shape[0])
     jacobian = []
 
-    for i, _ in enumerate(rhs_adjoint):
-        rhs_adjoint[i] = 1.0
+    for i in range(rhs_adjoint.shape[0]):
+        rhs_adjoint = rhs_adjoint.at[i].set(1.0)
         adjoint = derivative_solver.solve(rhs_adjoint)
-        rhs_adjoint[i] = 0.0
-        jacobian_row = np.asarray(partial_derivative_parameter.T @ adjoint)
+        rhs_adjoint = rhs_adjoint.at[i].set(0.0)
+        jacobian_row = partial_derivative_parameter.T @ adjoint
         jacobian.append(jacobian_row)
-    jacobian = np.vstack(jacobian)
-    return jacobian
+    return jnp.stack(jacobian)
 
 
 # --------------------------------------------------------------------------------------------------
