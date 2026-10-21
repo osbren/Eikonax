@@ -776,16 +776,10 @@ def compute_eikonax_jacobian(
         jax.Array: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
             the full dense Jacobian and is intended only for small problems.
     """
-    rhs_adjoint = jnp.zeros(derivative_solver.sparse_system_matrix.shape[0])
-    jacobian = []
-
-    for i in range(rhs_adjoint.shape[0]):
-        rhs_adjoint = rhs_adjoint.at[i].set(1.0)
-        adjoint = derivative_solver.solve(rhs_adjoint)
-        rhs_adjoint = rhs_adjoint.at[i].set(0.0)
-        jacobian_row = partial_derivative_parameter.T @ adjoint
-        jacobian.append(jacobian_row)
-    return jnp.stack(jacobian)
+    num_vertices = derivative_solver.sparse_system_matrix.shape[0]
+    rhs_adjoint = jnp.eye(num_vertices, dtype=partial_derivative_parameter.dtype)
+    adjoints = jax.vmap(derivative_solver.solve)(rhs_adjoint)
+    return jax.vmap(lambda adjoint: partial_derivative_parameter.T @ adjoint)(adjoints)
 
 
 # --------------------------------------------------------------------------------------------------
