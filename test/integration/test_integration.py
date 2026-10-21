@@ -216,6 +216,55 @@ def test_solver_run_supports_jax_grad(setup_derivative_solve_checks):
 
 # --------------------------------------------------------------------------------------------------
 @pytest.mark.slow
+@pytest.mark.parametrize(
+    ("initial_site_values", "expected_active"),
+    [
+        (jnp.array([0.0, 0.0]), np.array([True, True])),
+        (jnp.array([0.0, 10.0]), np.array([True, False])),
+    ],
+    ids=["active", "inactive"],
+)
+def test_solver_run_grad_wrt_initial_site_values(
+    mesh_small, eikonax_solver_data, initial_site_values, expected_active
+):
+    vertices, simplices, _ = mesh_small
+    mesh_data = preprocessing.MeshData(vertices=vertices, simplices=simplices)
+    tensor_field = tensorfield.TensorField(
+        jnp.arange(simplices.shape[0], dtype=jnp.int32)[:, None],
+        tensorfield.InvLinearScalarSimplexTensor(2),
+    )
+    eikonal_solver = solver.Solver(
+        mesh_data,
+        solver.SolverData(**eikonax_solver_data),
+        tensor_field,
+        jnp.array([0, 8], dtype=jnp.int32),
+    )
+    parameter_vector = jnp.ones(simplices.shape[0])
+
+    def loss(initial_values):
+        return eikonal_solver.run(parameter_vector, initial_values).values.sum()
+
+    solution = eikonal_solver.run(parameter_vector, initial_site_values)
+    gradient = jax.grad(loss)(initial_site_values)
+    directions = jnp.eye(initial_site_values.size)
+    finite_difference = jax.vmap(
+        lambda direction: (
+            loss(initial_site_values + 1e-3 * direction)
+            - loss(initial_site_values - 1e-3 * direction)
+        )
+        / 2e-3
+    )(directions)
+
+    assert np.array_equal(
+        np.asarray(solution.values[jnp.array([0, 8])] >= initial_site_values),
+        expected_active,
+    )
+    assert np.allclose(gradient[~expected_active], 0.0)
+    assert np.allclose(gradient, finite_difference, atol=2e-3)
+
+
+# --------------------------------------------------------------------------------------------------
+@pytest.mark.slow
 def test_solver_supports_64_bit_precision():
     previous_x64_enabled = jax.config.x64_enabled
     jax.config.update("jax_enable_x64", True)

@@ -213,7 +213,8 @@ class Solver(eqx.Module):
 
         Args:
             parameter_vector (jax.Array): Global tensor-field parameters.
-            initial_site_values (jax.Array): Values assigned to the configured initial sites.
+            initial_site_values (jax.Array): Initial values assigned to the configured sites.
+                A lower value propagated from another site can overwrite an initial value.
 
         Raises:
             ValueError: Checks that the chosen loop type is valid.
@@ -537,8 +538,11 @@ def _run_values_fwd(
     output = solver._run_forward(parameter_vector, initial_site_values)
     solution, _, _ = output
     tensor_field = solver._tensor_field_object.assemble_field(parameter_vector)
+    active_initial_sites = (
+        solution[solver._initial_site_inds] >= initial_site_values
+    )
     partial_solution, partial_tensor = solver._partial_derivator.compute_partial_derivatives(
-        solution, tensor_field
+        solution, tensor_field, active_initial_sites
     )
     partial_parameter = linalg.contract_derivative_tensors(
         partial_tensor, solver._tensor_field_object, parameter_vector
@@ -559,7 +563,11 @@ def _run_values_bwd(
     derivative_solver = derivator.DerivativeSolver(solution, partial_solution)
     adjoint = derivative_solver.solve(grad_solution)
     parameter_gradient = partial_parameter.T @ adjoint
-    return (parameter_gradient, jnp.zeros_like(vjp_args[1]))
+    initial_site_inds = solver._initial_site_inds
+    initial_site_gradient = adjoint[initial_site_inds]
+    inactive_sites = solution[initial_site_inds] < vjp_args[1]
+    initial_site_gradient = jnp.where(inactive_sites, 0, initial_site_gradient)
+    return (parameter_gradient, initial_site_gradient)
 
 
 _run_values_custom.def_fwd(_run_values_fwd)

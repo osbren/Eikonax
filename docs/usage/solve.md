@@ -120,6 +120,9 @@ eikonax_solver = solver.Solver(
 solution = eikonax_solver.run(inv_speed_values, initial_site_values=jnp.array([0.0]))
 ```
 
+Initial site values are source values rather than strict boundary conditions. A lower value
+propagated from another source can overwrite one of them.
+
 The initial-site vertices are fixed when the solver is constructed, while their values are supplied
 to each `run` call. This permits repeated solves with different source values without rebuilding the
 solver.

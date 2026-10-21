@@ -24,6 +24,7 @@ import numpy.typing as npt
 import lineax as lx
 from jax.experimental import sparse
 from beartype.vale import Is
+from jaxtyping import Bool as jtBool
 from jaxtyping import Float as jtFloat
 from jaxtyping import Int as jtInt
 
@@ -112,6 +113,7 @@ class PartialDerivator(eqx.Module):
         self,
         solution_vector: jtFloat[jax.Array | npt.NDArray, "num_vertices"],
         tensor_field: jtFloat[jax.Array | npt.NDArray, "num_simplices dim dim"],
+        active_initial_sites: jtBool[jax.Array, "num_initial_sites"] | None = None,
     ) -> tuple[sparse.BCOO, linalg.DerivatorSparseTensor]:
         r"""Compute the partial derivatives of the Godunov update operator.
 
@@ -136,6 +138,9 @@ class PartialDerivator(eqx.Module):
         Args:
             solution_vector (jax.Array): Current solution
             tensor_field (jax.Array): Parameter field
+            active_initial_sites (jax.Array, optional): Mask identifying initial sites whose
+                supplied values remain active in the solution. If omitted, all initial sites are
+                treated as fixed.
 
         Returns:
             tuple[jax.experimental.sparse.BCOO, eikonax.linalg.DerivatorSparseTensor]:
@@ -155,10 +160,10 @@ class PartialDerivator(eqx.Module):
             )
         )
         partial_derivative_solution = self._process_partial_derivative_solution(
-            partial_derivative_solution
+            partial_derivative_solution, active_initial_sites
         )
         partial_derivative_parameter = self._process_partial_derivative_parameter(
-            partial_derivative_parameter
+            partial_derivative_parameter, active_initial_sites
         )
         return partial_derivative_solution, partial_derivative_parameter
 
@@ -168,13 +173,13 @@ class PartialDerivator(eqx.Module):
         partial_derivative_solution: jtFloat[
             jax.Array, "num_vertices max_num_adjacent_simplices 2"
         ],
+        active_initial_sites: jtBool[jax.Array, "num_initial_sites"] | None = None,
     ) -> sparse.BCOO:
         """Convert dense partial derivatives into the project's sparse matrix representation.
 
         This method transforms the dense vertex-wise derivative array into an
-        a JAX BCOO matrix by extracting row indices, column indices, and values. Derivatives at
-        initial/boundary sites are zeroed out since
-        these vertices have fixed values.
+        a JAX BCOO matrix by extracting row indices, column indices, and values.         Derivatives at active initial sites are zeroed out since those values are fixed by the
+        active source values. Inactive initial sites retain their propagated update derivatives.
 
         Args:
             partial_derivative_solution (jax.Array): Dense array of shape
@@ -186,9 +191,16 @@ class PartialDerivator(eqx.Module):
             jax.experimental.sparse.BCOO: Sparse matrix representing the partial derivative
                 matrix G_u with shape (num_vertices, num_vertices).
         """
-        partial_derivative_solution = partial_derivative_solution.at[
-            self._initial_site_inds, ...
-        ].set(0.0)
+        if active_initial_sites is None:
+            active_initial_sites = jnp.ones(self._initial_site_inds.shape, dtype=bool)
+        active_initial_site_mask = jnp.zeros(self._num_vertices, dtype=bool).at[
+            self._initial_site_inds
+        ].set(active_initial_sites)
+        partial_derivative_solution = jnp.where(
+            active_initial_site_mask[:, None, None],
+            0.0,
+            partial_derivative_solution,
+        )
         max_num_adjacent_vertices = self._adjacency_data.shape[1]
         row_inds = jnp.repeat(jnp.arange(self._num_vertices), 2 * max_num_adjacent_vertices)
         col_inds = self._adjacency_data[..., 1:3].flatten()
@@ -205,6 +217,7 @@ class PartialDerivator(eqx.Module):
         partial_derivative_parameter: jtFloat[
             jax.Array, "num_vertices max_num_adjacent_simplices dim dim"
         ],
+        active_initial_sites: jtBool[jax.Array, "num_initial_sites"] | None = None,
     ) -> linalg.DerivatorSparseTensor:
         """Package the parameter derivative tensor into DerivatorSparseTensor.
 
@@ -222,9 +235,16 @@ class PartialDerivator(eqx.Module):
             eikonax.linalg.DerivatorSparseTensor: Sparse tensor wrapper holding derivative values
                 and simplex connectivity metadata from ``self._adjacency_data``.
         """
-        partial_derivative_parameter = partial_derivative_parameter.at[
-            self._initial_site_inds, ...
-        ].set(0.0)
+        if active_initial_sites is None:
+            active_initial_sites = jnp.ones(self._initial_site_inds.shape, dtype=bool)
+        active_initial_site_mask = jnp.zeros(self._num_vertices, dtype=bool).at[
+            self._initial_site_inds
+        ].set(active_initial_sites)
+        partial_derivative_parameter = jnp.where(
+            active_initial_site_mask[:, None, None, None],
+            0.0,
+            partial_derivative_parameter,
+        )
         derivator_sparse_tensor = linalg.DerivatorSparseTensor(
             derivative_values=partial_derivative_parameter,
             adjacent_simplex_data=self._adjacency_data[..., 3],
