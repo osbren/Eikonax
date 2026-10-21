@@ -1,5 +1,6 @@
 import copy
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -119,8 +120,8 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
     output_partial_parameter = linalg.contract_derivative_tensors(
         output_partial_tensor, tensor_partial_parameter
     )
-    sparse_partial_solution = linalg.convert_to_scipy_sparse(output_partial_solution).todense()
-    sparse_partial_parameter = linalg.convert_to_scipy_sparse(output_partial_parameter).todense()
+    sparse_partial_solution = output_partial_solution.todense()
+    sparse_partial_parameter = output_partial_parameter.todense()
     expected_sparse_partial_solution, expected_sparse_partial_parameter = (
         expected_partial_derivatives
     )
@@ -134,11 +135,10 @@ def test_compute_partial_derivatives(setup_analytical_partial_derivative_tests):
 def test_derivative_solver_constructor_viable(setup_derivative_solve_checks):
     _, solution_vector, _, _, derivative_solver, _ = setup_derivative_solve_checks
     system_matrix = derivative_solver.sparse_system_matrix.todense()
-    permutation_matrix = derivative_solver.sparse_permutation_matrix.todense()
     assert system_matrix.shape == (solution_vector.size, solution_vector.size)
-    assert permutation_matrix.shape == (solution_vector.size, solution_vector.size)
     assert np.allclose(system_matrix, np.triu(system_matrix))
-    assert np.allclose(permutation_matrix @ permutation_matrix.T, np.identity(solution_vector.size))
+    permutation_indices = np.asarray(derivative_solver.permutation_indices)
+    assert np.array_equal(np.sort(permutation_indices), np.arange(solution_vector.size))
 
 
 # --------------------------------------------------------------------------------------------------
@@ -167,6 +167,7 @@ def test_derivative_solver_vs_finite_differences(setup_derivative_solve_checks):
     eikonax_jacobian = derivator.compute_eikonax_jacobian(
         derivative_solver, partial_derivative_parameter
     )
+    assert isinstance(eikonax_jacobian, jax.Array)
     finite_diff_jacobian = finitediff.compute_fd_jacobian(
         eikonax_solver=eikonal_solver,
         tensor_field=tensor_field,

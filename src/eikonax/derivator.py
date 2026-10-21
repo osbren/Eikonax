@@ -20,9 +20,9 @@ from typing import Annotated
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
 import numpy.typing as npt
-import scipy.sparse as sp
+import lineax as lx
+from jax.experimental import sparse
 from beartype.vale import Is
 from jaxtyping import Float as jtFloat
 from jaxtyping import Int as jtInt
@@ -112,7 +112,7 @@ class PartialDerivator(eqx.Module):
         self,
         solution_vector: jtFloat[jax.Array | npt.NDArray, "num_vertices"],
         tensor_field: jtFloat[jax.Array | npt.NDArray, "num_simplices dim dim"],
-    ) -> tuple[linalg.EikonaxSparseMatrix, linalg.DerivatorSparseTensor]:
+    ) -> tuple[sparse.BCOO, linalg.DerivatorSparseTensor]:
         r"""Compute the partial derivatives of the Godunov update operator.
 
         This method provides the main interface for computing the partial derivatives of the global
@@ -138,12 +138,9 @@ class PartialDerivator(eqx.Module):
             tensor_field (jax.Array): Parameter field
 
         Returns:
-            tuple[eikonax.linalg.EikonaxSparseMatrix, eikonax.linalg.DerivatorSparseTensor]:
+            tuple[jax.experimental.sparse.BCOO, eikonax.linalg.DerivatorSparseTensor]:
                 The partial derivatives G_u and G_M packaged in the project's sparse data
-                structures. [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] contains the
-                (row_inds, col_inds, values, shape) representation used by the project and can be
-                converted to a SciPy sparse array via the
-                [`convert_to_scipy_sparse`][eikonax.linalg.convert_to_scipy_sparse] method.
+                structures. G_u is a JAX BCOO sparse matrix.
                 G_u corresponds to a square operator of shape (N_V, N_V). G_M is returned as a
                 [`DerivatorSparseTensor`][eikonax.linalg.DerivatorSparseTensor] holding the
                 per-vertex derivative values with shape (N_V, N_S_adj, d, d) and index
@@ -171,12 +168,12 @@ class PartialDerivator(eqx.Module):
         partial_derivative_solution: jtFloat[
             jax.Array, "num_vertices max_num_adjacent_simplices 2"
         ],
-    ) -> linalg.EikonaxSparseMatrix:
+    ) -> sparse.BCOO:
         """Convert dense partial derivatives into the project's sparse matrix representation.
 
         This method transforms the dense vertex-wise derivative array into an
-        [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] by extracting row indices,
-        column indices, and values. Derivatives at initial/boundary sites are zeroed out since
+        a JAX BCOO matrix by extracting row indices, column indices, and values. Derivatives at
+        initial/boundary sites are zeroed out since
         these vertices have fixed values.
 
         Args:
@@ -186,10 +183,8 @@ class PartialDerivator(eqx.Module):
                 local Godunov update stencil.
 
         Returns:
-            eikonax.linalg.EikonaxSparseMatrix: Sparse container representing the partial
-                derivative matrix G_u with shape (num_vertices, num_vertices). Can be converted
-                to a SciPy sparse array via
-                [`convert_to_scipy_sparse`][eikonax.linalg.convert_to_scipy_sparse].
+            jax.experimental.sparse.BCOO: Sparse matrix representing the partial derivative
+                matrix G_u with shape (num_vertices, num_vertices).
         """
         partial_derivative_solution = partial_derivative_solution.at[
             self._initial_site_inds, ...
@@ -198,12 +193,11 @@ class PartialDerivator(eqx.Module):
         row_inds = jnp.repeat(jnp.arange(self._num_vertices), 2 * max_num_adjacent_vertices)
         col_inds = self._adjacency_data[..., 1:3].flatten()
         values = partial_derivative_solution.flatten()
-        eikonax_sparse_matrix = linalg.EikonaxSparseMatrix(
-            row_inds=row_inds,
-            col_inds=col_inds,
-            values=values,
+        eikonax_sparse_matrix = sparse.BCOO(
+            (values, jnp.stack((row_inds, col_inds), axis=1)),
             shape=(self._num_vertices, self._num_vertices),
         )
+        eikonax_sparse_matrix = eikonax_sparse_matrix.sum_duplicates()
         return eikonax_sparse_matrix
 
     # ----------------------------------------------------------------------------------------------
@@ -630,12 +624,6 @@ class DerivativeSolver:
         through simple backsubstitution. All matrices need to be assembled only once.
 
     !!! info "Change in tooling"
-        In the `DerivativeSolver`, we leave JAX and fall back to the `numpy`/`scipy` stack. While
-        the sequential solver operation should not be mush slower on the CPU, we have to transfer
-        the data back from the offloading device. We plan to implement a GPU-compatible solver with
-        [CuPy](https://cupy.dev/) in a future version, or in JAX as soon as it offers the necessary
-        linear algebra tools.
-
     Methods:
         solve: Solve the linear system for the adjoint variable
     """
@@ -644,7 +632,7 @@ class DerivativeSolver:
     def __init__(
         self,
         solution: jtFloat[jax.Array | npt.NDArray, "num_vertices"],
-        sparse_partial_update_solution: sp.sparray,
+        sparse_partial_update_solution: sparse.BCOO,
     ) -> None:
         r"""Constructor for the derivative solver.
 
@@ -653,23 +641,22 @@ class DerivativeSolver:
 
         Args:
             solution (jax.Array | npt.NDArray): Obtained solution of the Eikonal equation.
-            sparse_partial_update_solution (scipy.sparray): Sparse matrix
-                representing $\mathbf{G}_u$. Any SciPy sparse format is accepted as long
-                as it supports conversion to CSC via ``.tocsc()`` (e.g. ``coo_array``,
-                ``coo_matrix``, ``csr_matrix``). The implementation will convert it to
-                CSC internally.
+            sparse_partial_update_solution (jax.experimental.sparse.BCOO): Sparse matrix
+                representing $\mathbf{G}_u$.
         """
         num_points = solution.size
-        solution = np.array(solution, dtype=np.float32)
-        self._sparse_permutation_matrix = self._assemble_permutation_matrix(solution)
+        solution = jnp.array(solution, dtype=jnp.float32)
+        self._permutation_indices = self._assemble_permutation_indices(solution)
+        self._inverse_permutation_indices = jnp.argsort(self._permutation_indices)
         self._sparse_system_matrix = self._assemble_system_matrix(
             sparse_partial_update_solution, num_points
         )
 
     # ----------------------------------------------------------------------------------------------
+    @eqx.filter_jit
     def solve(
         self, right_hand_side: jtFloat[jax.Array | npt.NDArray, "num_vertices"]
-    ) -> jtFloat[npt.NDArray, "num_parameters"]:
+    ) -> jtFloat[jax.Array, "num_vertices"]:
         r"""Solve the linear system for the parametric gradient.
 
         Following the notation from the class docstring,this method solves the linear system for
@@ -685,80 +672,94 @@ class DerivativeSolver:
             right_hand_side (jax.Array | npt.NDArray): RHS for the linear system solve
 
         Returns:
-            np.ndarray: Solution of the linear system solve, corresponding to the adjoint in an
+            jax.Array: Solution of the linear system solve, corresponding to the adjoint in an
                 optimization context.
         """
-        right_hand_side = np.array(right_hand_side, dtype=np.float32)
-        permutated_right_hand_side = self._sparse_permutation_matrix @ right_hand_side
-        permutated_solution = sp.linalg.spsolve_triangular(
-            self._sparse_system_matrix, permutated_right_hand_side, lower=False, unit_diagonal=True
+        right_hand_side = jnp.array(right_hand_side, dtype=jnp.float32)
+        permutated_right_hand_side = self._permute(right_hand_side)
+        operator = lx.FunctionLinearOperator(
+            lambda vector: self._sparse_system_matrix @ vector,
+            jax.ShapeDtypeStruct((self._sparse_system_matrix.shape[0],), jnp.float32),
+            tags=(lx.upper_triangular_tag, lx.unit_diagonal_tag),
         )
-        solution = self._sparse_permutation_matrix.T @ permutated_solution
+        result = lx.linear_solve(
+            operator,
+            permutated_right_hand_side,
+            solver=lx.Triangular(),
+            throw=True,
+        )
+        permutated_solution = result.value
+        solution = self._unpermute(permutated_solution)
 
         return solution
 
     # ----------------------------------------------------------------------------------------------
-    def _assemble_permutation_matrix(
-        self, solution: jtFloat[npt.NDArray, "num_vertices"]
-    ) -> sp.csc_matrix:
-        r"""Construct permutation matrix $\mathbf{P}$ for index ordering."""
-        num_points = solution.size
-        permutation_row_inds = np.arange(solution.size)
-        permutation_col_inds = np.argsort(solution)
-        permutation_values = np.ones(solution.size)
-        sparse_permutation_matrix = sp.csc_matrix(
-            (permutation_values, (permutation_row_inds, permutation_col_inds)),
-            shape=(num_points, num_points),
-        )
+    def _permute(
+        self, vector: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtFloat[jax.Array, "num_vertices"]:
+        """Apply the causality permutation to a vector."""
+        return vector[self._permutation_indices]
 
-        return sparse_permutation_matrix
+    # ----------------------------------------------------------------------------------------------
+    def _unpermute(
+        self, vector: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtFloat[jax.Array, "num_vertices"]:
+        """Apply the inverse causality permutation to a vector."""
+        return vector[self._inverse_permutation_indices]
+
+    # ----------------------------------------------------------------------------------------------
+    @staticmethod
+    def _assemble_permutation_indices(
+        solution: jtFloat[jax.Array, "num_vertices"]
+    ) -> jtInt[jax.Array, "num_vertices"]:
+        r"""Construct permutation indices for causality ordering."""
+        return jnp.argsort(solution)
 
     # ----------------------------------------------------------------------------------------------
     def _assemble_system_matrix(
         self,
-        sparse_partial_update_solution: sp.sparray,
+        sparse_partial_update_solution: sparse.BCOO,
         num_points: int,
-    ) -> sp.csc_matrix:
+    ) -> sparse.BCOO:
         r"""Assemble system matrix $\bar{\mathbf{A}}$ for gradient solver.
 
-        Before invoking this method, the permutation matrix $\mathbf{P}$ must be initialized.
+        Before invoking this method, the permutation indices must be initialized.
 
         Args:
-            sparse_partial_update_solution (scipy.sparse matrix-like): Sparse matrix
-                representing $\mathbf{G}_u$. Will be converted to CSC internally using
-                ``.tocsc()``.
+            sparse_partial_update_solution (jax.experimental.sparse.BCOO): Sparse matrix
+                representing $\mathbf{G}_u$.
             num_points (int): Number of points (vertices) in the system; used to build
                 the identity matrix and shape the final system matrix.
         """
-        sparse_partial_update_solution = sparse_partial_update_solution.tocsc()
-        sparse_identity_matrix = sp.identity(num_points, format="csc")
-        sparse_system_matrix = sparse_identity_matrix - sparse_partial_update_solution
+        sparse_identity_matrix = sparse.eye(num_points, dtype=jnp.float32)
         sparse_system_matrix = (
-            self._sparse_permutation_matrix
-            @ sparse_system_matrix.T
-            @ self._sparse_permutation_matrix.T
+            sparse_identity_matrix - sparse_partial_update_solution
+        ).T
+        remapped_indices = self._inverse_permutation_indices[sparse_system_matrix.indices]
+        sparse_system_matrix = sparse.BCOO(
+            (sparse_system_matrix.data, remapped_indices),
+            shape=(num_points, num_points),
         )
-
-        return sparse_system_matrix
+        return sparse_system_matrix.sum_duplicates()
 
     # ----------------------------------------------------------------------------------------------
     @property
-    def sparse_system_matrix(self) -> sp.csc_matrix:
+    def sparse_system_matrix(self) -> sparse.BCOO:
         r"""Get system matrix $\bar{\mathbf{A}}\in\mathbb{R}^{{N_V}\times {N_V}}$."""
         return self._sparse_system_matrix
 
     # ----------------------------------------------------------------------------------------------
     @property
-    def sparse_permutation_matrix(self) -> sp.csc_matrix:
-        r"""Get permutation matrix $\mathbf{P}\in\mathbb{R}^{{N_V}\times {N_V}}$."""
-        return self._sparse_permutation_matrix
+    def permutation_indices(self) -> jax.Array:
+        """Get the indices used by the causality permutation."""
+        return self._permutation_indices
 
 
 # ==================================================================================================
 def compute_eikonax_jacobian(
     derivative_solver: DerivativeSolver,
-    partial_derivative_parameter: sp.sparray,
-) -> npt.NDArray:
+    partial_derivative_parameter: sparse.BCOO,
+) -> jtFloat[jax.Array, "num_vertices num_parameters"]:
     """Compute Jacobian from concatenation of gradients, computed with unit vector RHS.
 
     !!! warning
@@ -767,28 +768,18 @@ def compute_eikonax_jacobian(
 
     Args:
         derivative_solver (DerivativeSolver): Initialized derivative solver object.
-        partial_derivative_parameter (scipy.sparse matrix-like or numpy.ndarray):
+        partial_derivative_parameter (jax.experimental.sparse.BCOO or numpy.ndarray):
             Partial derivative of the global update operator with respect to the parameter
-            vector/parameters. Should support matrix-vector multiplication or transposed
-            multiplication with the adjoint vector; typical inputs are SciPy sparse
-            matrices/arrays (e.g. ``coo_array``, ``csr_matrix``) or dense NumPy arrays with
-            shape (N_V, M).
+            vector/parameters.
 
     Returns:
-        npt.NDArray: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
+        jax.Array: Dense Jacobian matrix with shape (N_V, M). Note: this routine builds
             the full dense Jacobian and is intended only for small problems.
     """
-    rhs_adjoint = np.zeros(derivative_solver.sparse_permutation_matrix.shape[0])
-    jacobian = []
-
-    for i, _ in enumerate(rhs_adjoint):
-        rhs_adjoint[i] = 1.0
-        adjoint = derivative_solver.solve(rhs_adjoint)
-        rhs_adjoint[i] = 0.0
-        jacobian_row = partial_derivative_parameter.T @ adjoint
-        jacobian.append(jacobian_row)
-    jacobian = np.vstack(jacobian)
-    return jacobian
+    num_vertices = derivative_solver.sparse_system_matrix.shape[0]
+    rhs_adjoint = jnp.eye(num_vertices, dtype=partial_derivative_parameter.dtype)
+    adjoints = jax.vmap(derivative_solver.solve)(rhs_adjoint)
+    return jax.vmap(lambda adjoint: partial_derivative_parameter.T @ adjoint)(adjoints)
 
 
 # --------------------------------------------------------------------------------------------------

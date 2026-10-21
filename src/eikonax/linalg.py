@@ -7,9 +7,8 @@ non-zero entries along with their connectivity information.
 
 The module defines three main sparse container classes:
 
-1. [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix]: A COO-like (coordinate format)
-   sparse matrix representation compatible with JAX arrays. Stores row indices, column indices,
-   and values separately along with the matrix shape.
+1. [`jax.experimental.sparse.BCOO`](https://docs.jax.dev/en/latest/jax.experimental.sparse.html)
+   sparse matrix representations for derivative operators.
 
 2. [`DerivatorSparseTensor`][eikonax.linalg.DerivatorSparseTensor]: Specialized tensor for storing
    partial derivatives $\mathbf{G}_M$ computed by the
@@ -28,44 +27,19 @@ parametric derivative $\mathbf{G}_m = \mathbf{G}_M \frac{d\mathbf{M}}{d\mathbf{m
 for gradient computation.
 
 Classes:
-    EikonaxSparseMatrix: COO-style sparse matrix for JAX-compatible derivative storage
     DerivatorSparseTensor: Sparse tensor for partial derivatives w.r.t. metric tensors
     TensorfieldSparseTensor: Sparse tensor for tensor field Jacobian
 
 Functions:
-    convert_to_scipy_sparse: Convert EikonaxSparseMatrix to SciPy sparse array
     contract_derivative_tensors: Contract DerivatorSparseTensor with TensorfieldSparseTensor
 """
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
-import scipy.sparse as sp
+from jax.experimental import sparse
 from jaxtyping import Int as jtInt
 from jaxtyping import Real as jtReal
-
-
-# ==================================================================================================
-class EikonaxSparseMatrix(eqx.Module):
-    """COO-style sparse matrix representation compatible with JAX.
-
-    This class stores a sparse matrix in coordinate (COO) format using JAX arrays. Unlike standard
-    SciPy sparse matrices, this representation is JAX-compatible and can be used in JIT-compiled
-    functions and automatic differentiation. The matrix is defined by three parallel arrays storing
-    row indices, column indices, and corresponding values, along with the matrix shape.
-
-    Attributes:
-        row_inds (jax.Array): Row indices of non-zero entries with shape (num_entries,).
-        col_inds (jax.Array): Column indices of non-zero entries with shape (num_entries,).
-        values (jax.Array): Values of non-zero entries with shape (num_entries,).
-        shape (tuple[int, int]): Shape of the matrix (num_rows, num_cols).
-    """
-
-    row_inds: jtInt[jax.Array, "num_entries"]
-    col_inds: jtInt[jax.Array, "num_entries"]
-    values: jtReal[jax.Array, "num_entries"]
-    shape: tuple[int, int]
 
 
 class DerivatorSparseTensor(eqx.Module):
@@ -124,48 +98,11 @@ class TensorfieldSparseTensor(eqx.Module):
 
 
 # ==================================================================================================
-def convert_to_scipy_sparse(eikonax_sparse_matrix: EikonaxSparseMatrix) -> sp.coo_array:
-    """Convert EikonaxSparseMatrix to SciPy sparse COO array.
-
-    This function transforms the JAX-compatible
-    [`EikonaxSparseMatrix`][eikonax.linalg.EikonaxSparseMatrix] format into a standard SciPy
-    `coo_array`. The conversion involves:
-
-    1. Extracting row indices, column indices, and values as NumPy arrays
-    2. Filtering out zero entries to reduce memory footprint
-    3. Constructing a SciPy COO array and summing duplicate entries
-
-    This conversion is necessary when interfacing with SciPy's sparse linear algebra routines,
-    such as in the [`DerivativeSolver`][eikonax.derivator.DerivativeSolver] which requires CSC
-    format for the triangular solve.
-
-    Args:
-        eikonax_sparse_matrix (EikonaxSparseMatrix): Sparse matrix in JAX-compatible format.
-
-    Returns:
-        scipy.sparse.coo_array: SciPy sparse array in COO format with zeros removed and
-            duplicate entries summed.
-    """
-    row_inds = np.array(eikonax_sparse_matrix.row_inds, dtype=np.int32)
-    colinds = np.array(eikonax_sparse_matrix.col_inds, dtype=np.int32)
-    values = np.array(eikonax_sparse_matrix.values, dtype=np.float32)
-
-    nonzero_mask = np.nonzero(values)
-    row_inds = row_inds[nonzero_mask]
-    colinds = colinds[nonzero_mask]
-    values = values[nonzero_mask]
-
-    coo_matrix = sp.coo_array((values, (row_inds, colinds)), shape=eikonax_sparse_matrix.shape)
-    coo_matrix.sum_duplicates()
-    return coo_matrix
-
-
-# --------------------------------------------------------------------------------------------------
 @eqx.filter_jit
 def contract_derivative_tensors(
     derivative_sparse_tensor: DerivatorSparseTensor,
     tensorfield_sparse_tensor: TensorfieldSparseTensor,
-) -> EikonaxSparseMatrix:
+) -> sparse.BCOO:
     r"""Contract derivative tensors to compute total parametric derivative.
 
     This function performs the key operation in Eikonax's gradient computation pipeline: combining
@@ -194,7 +131,7 @@ def contract_derivative_tensors(
             [`TensorField`][eikonax.tensorfield.TensorField].
 
     Returns:
-        EikonaxSparseMatrix: Total parametric derivative $\mathbf{G}_m$ with shape
+        sparse.BCOO: Total parametric derivative $\mathbf{G}_m$ with shape
             (num_vertices, num_parameters_global). This can be transposed and multiplied with
             the adjoint vector to compute parametric gradients.
     """
@@ -211,10 +148,11 @@ def contract_derivative_tensors(
     row_inds = jnp.repeat(
         jnp.arange(num_vertices), max_num_adjacent_simplices * num_parameters_per_simplex
     )
-    eikonax_sparse_matrix = EikonaxSparseMatrix(
-        row_inds=row_inds,
-        col_inds=col_inds.flatten(),
-        values=values.flatten(),
+    eikonax_sparse_matrix = sparse.BCOO(
+        (
+            values.flatten(),
+            jnp.stack((row_inds, col_inds.flatten()), axis=1),
+        ),
         shape=(num_vertices, tensorfield_sparse_tensor.num_parameters_global),
     )
     return eikonax_sparse_matrix
