@@ -259,6 +259,11 @@ def test_solver_run_grad_wrt_initial_site_values(
         np.asarray(solution.values[jnp.array([0, 8])] >= initial_site_values),
         expected_active,
     )
+    assert np.all(solution.values[jnp.array([0, 8])] <= initial_site_values)
+    assert np.allclose(
+        solution.values[jnp.array([0, 8])][expected_active],
+        initial_site_values[expected_active],
+    )
     assert np.allclose(gradient[~expected_active], 0.0)
     assert np.allclose(gradient, finite_difference, atol=2e-3)
 
